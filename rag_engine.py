@@ -1,9 +1,8 @@
-import requests
 import fitz
 import numpy as np
-from sentence_transformers import SentenceTransformer
-import hashlib
+import requests
 import json
+from sentence_transformers import SentenceTransformer
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 MODEL_NAME = "gemma3:1b"
@@ -12,154 +11,120 @@ MODEL_NAME = "gemma3:1b"
 class RAGEngine:
 
     def __init__(self):
-
         self.embedder = SentenceTransformer(
             "all-MiniLM-L6-v2",
             device="cpu"
         )
 
-        # ---- multi document storage ----
-        self.documents = {}
-        self.global_chunks = []
-        self.global_embeddings = None
-
+        self.chunks = []
+        self.embeddings = None
         self.chat_history = []
-        self.summary_cache = ""
 
-    # ------------------------------------------------
-    # HASH
-    # ------------------------------------------------
-    def file_hash(self, file):
-        return hashlib.md5(file.getvalue()).hexdigest()
+    # --------------------------------
+    # PDF LOADING
+    # --------------------------------
+    def load_pdfs(self, files):
 
-    # ------------------------------------------------
-    # LOAD PDF
-    # ------------------------------------------------
-    def load_pdf(self, file):
+        self.chunks = []
 
-        doc_id = self.file_hash(file)
-        if doc_id in self.documents:
-            return
+        for file in files:
+            doc = fitz.open(stream=file.read(), filetype="pdf")
 
-        filename = file.name
-        pdf = fitz.open(stream=file.read(), filetype="pdf")
+            for page_num, page in enumerate(doc):
+                text = page.get_text().strip()
 
-        text = ""
-        for page in pdf:
-            text += page.get_text()
+                if not text:
+                    continue
 
-        chunks = self.split_text(text)
+                for chunk in self.split_text(text):
+                    self.chunks.append({
+                        "text": chunk,
+                        "source": file.name,
+                        "page": page_num + 1
+                    })
+
+        if not self.chunks:
+            raise ValueError("No readable text found in PDFs.")
+
+        texts = [c["text"] for c in self.chunks]
+
         embeddings = self.embedder.encode(
-            chunks,
-            normalize_embeddings=True
+            texts,
+            show_progress_bar=True
         )
 
-        topic_vector = np.mean(embeddings, axis=0)
+        # ✅ normalize once (fast cosine similarity)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        self.embeddings = embeddings / norms
 
-        self.documents[doc_id] = {
-            "filename": filename,
-            "chunks": chunks,
-            "embeddings": embeddings,
-            "topic": topic_vector
-        }
+    # --------------------------------
+    # TEXT SPLITTER
+    # --------------------------------
+    def split_text(self, text, size=400, overlap=80):
 
-        self._update_global_index()
-        self.summary_cache = ""
-
-    # ------------------------------------------------
-    def split_text(self, text, chunk_size=500):
         words = text.split()
-        return [
-            " ".join(words[i:i + chunk_size])
-            for i in range(0, len(words), chunk_size)
-        ]
+        chunks = []
 
-    # ------------------------------------------------
-    # GLOBAL INDEX
-    # ------------------------------------------------
-    def _update_global_index(self):
+        step = size - overlap
 
-        all_chunks = []
-        all_embeddings = []
+        for i in range(0, len(words), step):
+            chunk = " ".join(words[i:i + size])
+            if chunk:
+                chunks.append(chunk)
 
-        for doc in self.documents.values():
+        return chunks
 
-            for chunk in doc["chunks"]:
-                all_chunks.append({
-                    "text": chunk,
-                    "source": doc["filename"]
-                })
+    # --------------------------------
+    # RETRIEVAL
+    # --------------------------------
+    def retrieve(self, query, k=3):
 
-            all_embeddings.append(doc["embeddings"])
+        q_embed = self.embedder.encode([query])[0]
+        q_embed = q_embed / np.linalg.norm(q_embed)
 
-        self.global_chunks = all_chunks
+        scores = np.dot(self.embeddings, q_embed)
 
-        if all_embeddings:
-            self.global_embeddings = np.vstack(all_embeddings)
+        top_idx = np.argsort(scores)[-k:][::-1]
 
-    # ------------------------------------------------
-    def cosine(self, A, B):
-        return np.dot(A, B) / (
-            np.linalg.norm(A) *
-            np.linalg.norm(B) + 1e-10
-        )
+        return [self.chunks[i] for i in top_idx]
 
-    # ------------------------------------------------
-    # TOPIC SIMILARITY
-    # ------------------------------------------------
-    def documents_are_similar(self, threshold=0.75):
+    # --------------------------------
+    # PROMPT BUILDER
+    # --------------------------------
+    def build_prompt(self, query, contexts):
 
-        topics = [d["topic"] for d in self.documents.values()]
+        context_text = "\n\n".join([
+            f"[Source: {c['source']} | Page {c['page']}]\n{c['text']}"
+            for c in contexts
+        ])
 
-        if len(topics) < 2:
-            return True
+        history = "\n".join(self.chat_history[-6:])
 
-        sims = []
-        for i in range(len(topics)):
-            for j in range(i + 1, len(topics)):
-                sims.append(self.cosine(topics[i], topics[j]))
+        return f"""
+You are a helpful PDF assistant.
 
-        return np.mean(sims) > threshold
+Use ONLY the provided context.
+If answer not present, say you don't know.
 
-    # ------------------------------------------------
-    # RETRIEVE + CITATIONS
-    # ------------------------------------------------
-    def retrieve(self, query, top_k=6):
+Conversation History:
+{history}
 
-        query_emb = self.embedder.encode(
-            [query],
-            normalize_embeddings=True
-        )[0]
+Context:
+{context_text}
 
-        scores = np.dot(self.global_embeddings, query_emb)
+Question:
+{query}
 
-        idx = np.argsort(scores)[-top_k:][::-1]
+Answer clearly and cite sources.
+"""
 
-        selected = [self.global_chunks[i] for i in idx]
+    # --------------------------------
+    # STREAMING ANSWER
+    # --------------------------------
+    def stream_answer(self, query):
 
-        context = "\n".join([c["text"] for c in selected])
-        sources = list(set([c["source"] for c in selected]))
-
-        return context, sources
-
-    # ------------------------------------------------
-    # NORMAL LLM CALL
-    # ------------------------------------------------
-    def call_llm(self, prompt):
-
-        payload = {
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": False
-        }
-
-        r = requests.post(OLLAMA_URL, json=payload, timeout=600)
-        return r.json().get("response", "").strip()
-
-    # ------------------------------------------------
-    # STREAMING LLM
-    # ------------------------------------------------
-    def stream_llm(self, prompt):
+        contexts = self.retrieve(query)
+        prompt = self.build_prompt(query, contexts)
 
         payload = {
             "model": MODEL_NAME,
@@ -167,116 +132,52 @@ class RAGEngine:
             "stream": True
         }
 
-        with requests.post(
+        response = requests.post(
             OLLAMA_URL,
             json=payload,
             stream=True
-        ) as r:
+        )
 
-            for line in r.iter_lines():
-                if line:
-                    try:
-                        token = json.loads(
-                            line.decode()
-                        )["response"]
-                        yield token
-                    except:
-                        pass
+        full_text = ""
 
-    # ------------------------------------------------
-    # SMART FOLLOWUPS
-    # ------------------------------------------------
-    def resolve_followup(self, question):
+        for line in response.iter_lines():
 
-        followups = [
+            if not line:
+                continue
+
+            try:
+                data = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                continue
+
+            token = data.get("response", "")
+            full_text += token
+
+            yield token, contexts
+
+        # ✅ store conversation memory
+        self.chat_history.append(f"User: {query}")
+        self.chat_history.append(f"Assistant: {full_text}")
+
+    # --------------------------------
+    # FOLLOW-UP UNDERSTANDING
+    # --------------------------------
+    def reformulate_query(self, query):
+
+        follow_words = [
             "explain more",
             "tell more",
             "summarize that",
-            "elaborate",
-            "details"
+            "why",
+            "how"
         ]
 
-        if self.chat_history and any(
-            f in question.lower() for f in followups
-        ):
-            last_q = self.chat_history[-1][0]
-            return last_q + " " + question
+        if any(w in query.lower() for w in follow_words):
 
-        return question
+            # find last user question
+            for msg in reversed(self.chat_history):
+                if msg.startswith("User:"):
+                    last_question = msg.replace("User:", "").strip()
+                    return f"{query} (regarding: {last_question})"
 
-    # ------------------------------------------------
-    # SUMMARY
-    # ------------------------------------------------
-    def generate_summary(self):
-
-        if not self.documents:
-            return "No PDFs loaded."
-
-        if self.summary_cache:
-            return self.summary_cache
-
-        if self.documents_are_similar():
-
-            context = "\n".join(
-                [c["text"] for c in self.global_chunks[:8]]
-            )
-
-            prompt = f"""
-Create ONE unified concise summary combining all documents.
-
-{context}
-"""
-
-        else:
-
-            context = ""
-            for i, doc in enumerate(self.documents.values(), 1):
-                context += f"\nDocument {i}:\n"
-                context += "\n".join(doc["chunks"][:3])
-
-            prompt = f"""
-Create separate short summaries for each document.
-
-{context}
-"""
-
-        summary = self.call_llm(prompt)
-        self.summary_cache = summary
-        return summary
-
-    # ------------------------------------------------
-    # STREAMING CHAT (SPECIFIC ANSWERS)
-    # ------------------------------------------------
-    def ask_question_stream(self, question):
-
-        question = self.resolve_followup(question)
-
-        context, sources = self.retrieve(question)
-
-        prompt = f"""
-You are a precise document QA assistant.
-
-Rules:
-- Answer ONLY using context.
-- Be specific.
-- Include numbers, definitions, names when present.
-- No assumptions.
-- If missing say: Not found in documents.
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:
-"""
-
-        answer = ""
-
-        for token in self.stream_llm(prompt):
-            answer += token
-            yield token, None
-
-        self.chat_history.append((question, answer))
-
-        yield "", sources
+        return query
