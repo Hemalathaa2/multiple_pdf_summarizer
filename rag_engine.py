@@ -192,27 +192,37 @@ Create separate short summaries for each document.
     # ------------------------------------------------
     def ask_question(self, question):
 
-        context = self.retrieve(question)
+    # -------- Enhance query using last question only --------
+    if self.chat_history:
+        last_question = self.chat_history[-1][0]
+        enhanced_query = last_question + " " + question
+    else:
+        enhanced_query = question
 
-        history_text = "\n".join(
-            [f"Q:{q}\nA:{a}" for q, a in self.chat_history[-3:]]
-        )
+    # retrieve using enhanced semantic query
+    context = self.retrieve(enhanced_query)
 
-        prompt = f"""
-You are a helpful AI assistant.
+    # STRICT grounded prompt
+    prompt = f"""
+You are an expert assistant.
 
-Conversation history:
-{history_text}
+Rules:
+- Answer ONLY using the provided context.
+- Be precise and specific.
+- Do NOT repeat previous answers.
+- If information is missing, say: "Not found in documents."
 
 Context:
 {context}
 
 Question: {question}
+
 Answer:
 """
 
-        answer = self.call_llm(prompt)
+    answer = self.call_llm(prompt)
 
-        self.chat_history.append((question, answer))
+    # store memory silently
+    self.chat_history.append((question, answer))
 
-        return answer
+    return answer
