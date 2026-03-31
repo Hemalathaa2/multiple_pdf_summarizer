@@ -41,10 +41,13 @@ else:
     st.write("No summary generated.")
 
 # ---------------- QA ----------------
-question = st.text_input("Ask questions about the PDFs")
+st.subheader("Chat with PDFs")
+
+question = st.text_input("Ask something")
 
 if question:
     with st.spinner("Thinking..."):
         answer = st.session_state.rag.ask_question(question)
 
+    st.write("### 🤖 Answer")
     st.write(answer)
