@@ -21,7 +21,7 @@ class RAGEngine:
         self.chat_history = []
 
     # --------------------------------
-    # PDF LOADING
+    # LOAD PDFs
     # --------------------------------
     def load_pdfs(self, files):
 
@@ -53,73 +53,8 @@ class RAGEngine:
             show_progress_bar=True
         )
 
-        # ✅ normalize once (fast cosine similarity)
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        self.embeddings = embeddings / norms
-
-    # --------------------------------
-    # TEXT SPLITTER
-    # --------------------------------
-    def split_text(self, text, size=400, overlap=80):
-
-        words = text.split()
-        chunks = []
-
-        step = size - overlap
-
-        for i in range(0, len(words), step):
-            chunk = " ".join(words[i:i + size])
-            if chunk:
-                chunks.append(chunk)
-
-        return chunks
-
-    # --------------------------------
-    # RETRIEVAL
-    # --------------------------------
-    def retrieve(self, query, k=3):
-
-        q_embed = self.embedder.encode([query])[0]
-        q_embed = q_embed / np.linalg.norm(q_embed)
-
-        scores = np.dot(self.embeddings, q_embed)
-
-        top_idx = np.argsort(scores)[-k:][::-1]
-
-        return [self.chunks[i] for i in top_idx]
-
-    # --------------------------------
-    # PROMPT BUILDER
-    # --------------------------------
-    def build_prompt(self, query, contexts):
-
-        context_text = "\n\n".join([
-            f"[Source: {c['source']} | Page {c['page']}]\n{c['text']}"
-            for c in contexts
-        ])
-
-        history = "\n".join(self.chat_history[-6:])
-
-        return f"""
-You are a helpful PDF assistant.
-
-Use ONLY the provided context.
-If answer not present, say you don't know.
-
-Conversation History:
-{history}
-
-Context:
-{context_text}
-
-Question:
-{query}
-
-Answer clearly and cite sources.
-"""
-
-    # --------------------------------
-    # STREAMING ANSWER
+        # normalize embeddings
+    # STREAM CHAT ANSWER
     # --------------------------------
     def stream_answer(self, query):
 
@@ -155,12 +90,12 @@ Answer clearly and cite sources.
 
             yield token, contexts
 
-        # ✅ store conversation memory
+        # save conversation memory
         self.chat_history.append(f"User: {query}")
         self.chat_history.append(f"Assistant: {full_text}")
 
     # --------------------------------
-    # FOLLOW-UP UNDERSTANDING
+    # FOLLOW-UP QUERY UNDERSTANDING
     # --------------------------------
     def reformulate_query(self, query):
 
@@ -174,10 +109,64 @@ Answer clearly and cite sources.
 
         if any(w in query.lower() for w in follow_words):
 
-            # find last user question
             for msg in reversed(self.chat_history):
                 if msg.startswith("User:"):
                     last_question = msg.replace("User:", "").strip()
                     return f"{query} (regarding: {last_question})"
 
         return query
+
+    # --------------------------------
+    # STREAM DOCUMENT SUMMARY
+    # --------------------------------
+    def stream_summary(self):
+
+        if not self.chunks:
+            yield "No PDFs loaded.", []
+            return
+
+        texts = [c["text"] for c in self.chunks[:15]]
+        context_text = "\n\n".join(texts)
+
+        prompt = f"""
+You are an expert document analyst.
+
+Provide a structured summary including:
+- Main topics
+- Key insights
+- Important findings
+- Conclusion
+
+Document Content:
+{context_text}
+"""
+
+        payload = {
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "stream": True
+        }
+
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            stream=True
+        )
+
+        full_text = ""
+
+        for line in response.iter_lines():
+
+            if not line:
+                continue
+
+            try:
+                data = json.loads(line.decode("utf-8"))
+            except:
+                continue
+
+            token = data.get("response", "")
+            full_text += token
+
+            yield token, self.chunks[:3]
+
