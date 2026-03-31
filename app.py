@@ -32,15 +32,37 @@ if files and not st.session_state.indexed:
         st.session_state.indexed = True
     st.success("PDFs Ready!")
 
+
+
+# GENERATE SUMMARY BUTTON
 # -------------------------
-# CHAT DISPLAY
+if st.session_state.indexed:
+    if st.button("🧠 Generate Document Summary"):
+
+        with st.chat_message("assistant"):
+
+            placeholder = st.empty()
+            summary_text = ""
+
+            for token, _ in st.session_state.rag.stream_summary():
+                summary_text += token
+                placeholder.markdown(summary_text + "▌")
+
+            placeholder.markdown(summary_text)
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": summary_text}
+        )
+
+# -------------------------
+# CHAT HISTORY DISPLAY
 # -------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # -------------------------
-# USER INPUT
+# USER CHAT INPUT
 # -------------------------
 query = st.chat_input("Ask something about PDFs...")
 
@@ -74,3 +96,4 @@ if query:
     st.session_state.messages.append(
         {"role": "assistant", "content": full_response}
     )
+
