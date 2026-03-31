@@ -3,6 +3,7 @@ import fitz
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import hashlib
+import json
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 MODEL_NAME = "gemma3:1b"
@@ -11,13 +12,14 @@ MODEL_NAME = "gemma3:1b"
 class RAGEngine:
 
     def __init__(self):
+
         self.embedder = SentenceTransformer(
             "all-MiniLM-L6-v2",
             device="cpu"
         )
 
         # ---- multi document storage ----
-        self.documents = {}   # doc_id -> data
+        self.documents = {}
         self.global_chunks = []
         self.global_embeddings = None
 
@@ -25,7 +27,7 @@ class RAGEngine:
         self.summary_cache = ""
 
     # ------------------------------------------------
-    # HASH (avoid duplicate uploads)
+    # HASH
     # ------------------------------------------------
     def file_hash(self, file):
         return hashlib.md5(file.getvalue()).hexdigest()
@@ -36,10 +38,10 @@ class RAGEngine:
     def load_pdf(self, file):
 
         doc_id = self.file_hash(file)
-
         if doc_id in self.documents:
             return
 
+        filename = file.name
         pdf = fitz.open(stream=file.read(), filetype="pdf")
 
         text = ""
@@ -47,12 +49,15 @@ class RAGEngine:
             text += page.get_text()
 
         chunks = self.split_text(text)
-        embeddings = self.embedder.encode(chunks)
+        embeddings = self.embedder.encode(
+            chunks,
+            normalize_embeddings=True
+        )
 
-        # topic vector = mean embedding
         topic_vector = np.mean(embeddings, axis=0)
 
         self.documents[doc_id] = {
+            "filename": filename,
             "chunks": chunks,
             "embeddings": embeddings,
             "topic": topic_vector
@@ -70,7 +75,7 @@ class RAGEngine:
         ]
 
     # ------------------------------------------------
-    # GLOBAL SEARCH INDEX
+    # GLOBAL INDEX
     # ------------------------------------------------
     def _update_global_index(self):
 
@@ -78,7 +83,13 @@ class RAGEngine:
         all_embeddings = []
 
         for doc in self.documents.values():
-            all_chunks.extend(doc["chunks"])
+
+            for chunk in doc["chunks"]:
+                all_chunks.append({
+                    "text": chunk,
+                    "source": doc["filename"]
+                })
+
             all_embeddings.append(doc["embeddings"])
 
         self.global_chunks = all_chunks
@@ -87,8 +98,6 @@ class RAGEngine:
             self.global_embeddings = np.vstack(all_embeddings)
 
     # ------------------------------------------------
-    # COSINE SIM
-    # ------------------------------------------------
     def cosine(self, A, B):
         return np.dot(A, B) / (
             np.linalg.norm(A) *
@@ -96,7 +105,7 @@ class RAGEngine:
         )
 
     # ------------------------------------------------
-    # TOPIC SIMILARITY CHECK
+    # TOPIC SIMILARITY
     # ------------------------------------------------
     def documents_are_similar(self, threshold=0.75):
 
@@ -113,26 +122,28 @@ class RAGEngine:
         return np.mean(sims) > threshold
 
     # ------------------------------------------------
-    # RETRIEVE
+    # RETRIEVE + CITATIONS
     # ------------------------------------------------
-    def retrieve(self, query, top_k=4):
+    def retrieve(self, query, top_k=6):
 
-        query_emb = self.embedder.encode([query])[0]
+        query_emb = self.embedder.encode(
+            [query],
+            normalize_embeddings=True
+        )[0]
 
-        scores = np.dot(
-            self.global_embeddings,
-            query_emb
-        ) / (
-            np.linalg.norm(self.global_embeddings, axis=1)
-            * np.linalg.norm(query_emb) + 1e-10
-        )
+        scores = np.dot(self.global_embeddings, query_emb)
 
-        idx = np.argsort(scores)[-top_k:]
+        idx = np.argsort(scores)[-top_k:][::-1]
 
-        return "\n".join(self.global_chunks[i] for i in idx)
+        selected = [self.global_chunks[i] for i in idx]
+
+        context = "\n".join([c["text"] for c in selected])
+        sources = list(set([c["source"] for c in selected]))
+
+        return context, sources
 
     # ------------------------------------------------
-    # LLM CALL
+    # NORMAL LLM CALL
     # ------------------------------------------------
     def call_llm(self, prompt):
 
@@ -146,7 +157,55 @@ class RAGEngine:
         return r.json().get("response", "").strip()
 
     # ------------------------------------------------
-    # SMART SUMMARY
+    # STREAMING LLM
+    # ------------------------------------------------
+    def stream_llm(self, prompt):
+
+        payload = {
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "stream": True
+        }
+
+        with requests.post(
+            OLLAMA_URL,
+            json=payload,
+            stream=True
+        ) as r:
+
+            for line in r.iter_lines():
+                if line:
+                    try:
+                        token = json.loads(
+                            line.decode()
+                        )["response"]
+                        yield token
+                    except:
+                        pass
+
+    # ------------------------------------------------
+    # SMART FOLLOWUPS
+    # ------------------------------------------------
+    def resolve_followup(self, question):
+
+        followups = [
+            "explain more",
+            "tell more",
+            "summarize that",
+            "elaborate",
+            "details"
+        ]
+
+        if self.chat_history and any(
+            f in question.lower() for f in followups
+        ):
+            last_q = self.chat_history[-1][0]
+            return last_q + " " + question
+
+        return question
+
+    # ------------------------------------------------
+    # SUMMARY
     # ------------------------------------------------
     def generate_summary(self):
 
@@ -156,20 +215,18 @@ class RAGEngine:
         if self.summary_cache:
             return self.summary_cache
 
-        # ---------- SAME TOPIC ----------
         if self.documents_are_similar():
 
             context = "\n".join(
-                self.global_chunks[:8]
+                [c["text"] for c in self.global_chunks[:8]]
             )
 
             prompt = f"""
-Create ONE unified summary combining all documents.
+Create ONE unified concise summary combining all documents.
 
 {context}
 """
 
-        # ---------- DIFFERENT TOPICS ----------
         else:
 
             context = ""
@@ -188,29 +245,23 @@ Create separate short summaries for each document.
         return summary
 
     # ------------------------------------------------
-    # CHATBOT WITH MEMORY
+    # STREAMING CHAT (SPECIFIC ANSWERS)
     # ------------------------------------------------
-    def ask_question(self, question):
+    def ask_question_stream(self, question):
 
-    # -------- Enhance query using last question only --------
-    if self.chat_history:
-        last_question = self.chat_history[-1][0]
-        enhanced_query = last_question + " " + question
-    else:
-        enhanced_query = question
+        question = self.resolve_followup(question)
 
-    # retrieve using enhanced semantic query
-    context = self.retrieve(enhanced_query)
+        context, sources = self.retrieve(question)
 
-    # STRICT grounded prompt
-    prompt = f"""
-You are an expert assistant.
+        prompt = f"""
+You are a precise document QA assistant.
 
 Rules:
-- Answer ONLY using the provided context.
-- Be precise and specific.
-- Do NOT repeat previous answers.
-- If information is missing, say: "Not found in documents."
+- Answer ONLY using context.
+- Be specific.
+- Include numbers, definitions, names when present.
+- No assumptions.
+- If missing say: Not found in documents.
 
 Context:
 {context}
@@ -220,9 +271,12 @@ Question: {question}
 Answer:
 """
 
-    answer = self.call_llm(prompt)
+        answer = ""
 
-    # store memory silently
-    self.chat_history.append((question, answer))
+        for token in self.stream_llm(prompt):
+            answer += token
+            yield token, None
 
-    return answer
+        self.chat_history.append((question, answer))
+
+        yield "", sources
