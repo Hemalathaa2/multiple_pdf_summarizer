@@ -5,49 +5,44 @@ st.set_page_config(page_title="PDF AI Assistant")
 
 st.title("📚 Multi-PDF AI Knowledge Assistant")
 
-# ---------------- SESSION ----------------
+# SESSION
 if "rag" not in st.session_state:
     st.session_state.rag = RAGEngine()
 
-if "summary" not in st.session_state:
-    st.session_state.summary = ""
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
-# ---------------- UPLOAD MULTIPLE PDFs ----------------
-uploaded_files = st.file_uploader(
+# ---------------- Upload ----------------
+files = st.file_uploader(
     "Upload PDFs",
     type="pdf",
     accept_multiple_files=True
 )
 
-if uploaded_files:
+if files:
     with st.spinner("Processing PDFs..."):
-        for file in uploaded_files:
-            st.session_state.rag.load_pdf(file)
+        for f in files:
+            st.session_state.rag.load_pdf(f)
 
     st.success("Knowledge Base Updated ✅")
 
-# ---------------- SUMMARY ----------------
-if st.button("Generate Paragraph Summary"):
-    with st.spinner("Generating summary..."):
-        st.session_state.summary = (
-            st.session_state.rag.generate_summary()
-        )
+# ---------------- Summary ----------------
+if st.button("Generate Smart Summary"):
+    with st.spinner("Generating..."):
+        summary = st.session_state.rag.generate_summary()
+        st.write(summary)
 
-st.subheader("Summary")
-
-if st.session_state.summary:
-    st.write(st.session_state.summary)
-else:
-    st.write("No summary generated.")
-
-# ---------------- QA ----------------
+# ---------------- Chatbot ----------------
 st.subheader("Chat with PDFs")
 
-question = st.text_input("Ask something")
+question = st.text_input("Ask a question")
 
 if question:
-    with st.spinner("Thinking..."):
-        answer = st.session_state.rag.ask_question(question)
+    answer = st.session_state.rag.ask_question(question)
 
-    st.write("### 🤖 Answer")
-    st.write(answer)
+    st.session_state.chat.append((question, answer))
+
+# Display history
+for q, a in reversed(st.session_state.chat):
+    st.markdown(f"**🧑 {q}**")
+    st.markdown(f"**🤖 {a}**")
