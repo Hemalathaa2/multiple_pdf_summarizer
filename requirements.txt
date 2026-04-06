@@ -3,7 +3,9 @@ streamlit>=1.35.0
 pymupdf>=1.24.0
 numpy>=1.26.0
 groq>=0.9.0
-
+python-docx>=1.1.0
+python-pptx>=0.6.23
+openpyxl>=3.1.0
 # ── Embeddings & reranking ────────────────────────────────
 sentence-transformers>=3.0.0
 torch>=2.3.0           # pulls CUDA 12.x wheels automatically on H100
