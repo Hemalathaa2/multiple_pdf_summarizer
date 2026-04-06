@@ -434,7 +434,7 @@ class RAGEngine:
 
     def _map_batch(self, batch_text: str, batch_num: int, total: int) -> str:
         """MAP step: summarise one 12 000-char section into bullet points."""
-       prompt = (
+        prompt = (
     f"You are summarizing handwritten notes.\n\n"
     "IMPORTANT RULES:\n"
     "- ONLY use information clearly present in the text\n"
