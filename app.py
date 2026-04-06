@@ -139,8 +139,7 @@ if st.button("📝 Generate Summary"):
         "content": result
     })
 
-    # Save thread
-    st.session_state.threads[thread_id] = rag.chat_history
+   
 
     # Download
     st.download_button(
