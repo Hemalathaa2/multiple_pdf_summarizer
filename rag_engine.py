@@ -478,7 +478,7 @@ class RAGEngine:
             # MAP step
             partial_summaries = []
             for i, batch in enumerate(batches, start=1):
-                import time
+                
                 time.sleep(1)
                 yield f"  Summarising section {i} / {total_batches}...\n"
                 section_summary = self._map_batch(batch, i, total_batches)
