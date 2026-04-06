@@ -19,12 +19,12 @@ st.set_page_config(
 # Minimal CSS polish
 # ──────────────────────────────────────────────
 st.markdown(
-    """
+    """"""
     <style>
         .block-container { padding-top: 1.5rem; }
         .stChatMessage { border-radius: 10px; }
     </style>
-    """,
+    ""","""
     unsafe_allow_html=True,
 )
 
