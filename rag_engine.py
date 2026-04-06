@@ -434,13 +434,14 @@ class RAGEngine:
 
     def _map_batch(self, batch_text: str, batch_num: int, total: int) -> str:
         """MAP step: summarise one 12 000-char section into bullet points."""
-        prompt = (
-    f"You are summarizing handwritten Python notes.\n"
-    "The text may contain OCR errors. Infer the correct meaning.\n\n"
-    "Summarise the key topics clearly.\n"
-    "- Focus on concepts (operators, loops, functions, etc.)\n"
-    "- Ignore spelling mistakes\n"
-    "- 5 to 7 bullet points\n\n"
+       prompt = (
+    f"You are summarizing handwritten notes.\n\n"
+    "IMPORTANT RULES:\n"
+    "- ONLY use information clearly present in the text\n"
+    "- DO NOT guess or infer missing content\n"
+    "- DO NOT add topics not explicitly written\n"
+    "- If text is unclear, ignore it\n\n"
+    "Summarise into 5–7 bullet points.\n\n"
     f"TEXT:\n{batch_text}"
 )
         return self._call_llm(prompt, max_tokens=500)
