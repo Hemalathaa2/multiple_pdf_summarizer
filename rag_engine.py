@@ -38,7 +38,7 @@ TOP_K_FINAL = 5      # chunks sent to LLM after reranking
 BATCH_SIZE  = 64     # embedding batch size (set to 256 on H100)
 
 # Map-reduce summarisation
-SUMMARY_BATCH_CHARS  = 12_000   # characters per MAP batch (~3 000 tokens)
+SUMMARY_BATCH_CHARS  = 20_000   # characters per MAP batch (~3 000 tokens)
 SUMMARY_MAX_BATCHES  = 60       # cap: 720 k chars ~ 400+ pages per file
 SUMMARY_REDUCE_LIMIT = 18_000   # max chars fed into the final REDUCE call
 
@@ -370,16 +370,29 @@ class RAGEngine:
 
     # ── Map-reduce summary  (reads the ENTIRE document) ───────────────
 
+    import time
+
     def _call_llm(self, prompt: str, max_tokens: int = 700) -> str:
-        """Blocking LLM call used internally by the summariser."""
-        resp = self.client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=max_tokens,
-            stream=False,
-        )
-        return resp.choices[0].message.content or ""
+        retries = 3
+        delay = 2  # seconds
+    
+        for attempt in range(retries):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=max_tokens,
+                    stream=False,
+                )
+                return resp.choices[0].message.content or ""
+    
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    delay *= 2  # exponential backoff
+                else:
+                    return "⚠️ Rate limit reached. Please try again after a few seconds."
 
     @staticmethod
     def _normalise_bullets(raw: str) -> str:
@@ -465,6 +478,8 @@ class RAGEngine:
             # MAP step
             partial_summaries = []
             for i, batch in enumerate(batches, start=1):
+                import time
+                time.sleep(1)
                 yield f"  Summarising section {i} / {total_batches}...\n"
                 section_summary = self._map_batch(batch, i, total_batches)
                 partial_summaries.append(
