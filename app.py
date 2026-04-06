@@ -1,5 +1,5 @@
 """
-app.py – Final Clean Version (Summary + Chat History in Sidebar)
+app.py – ChatGPT-style UI (Threads + Center Chat)
 """
 
 import streamlit as st
@@ -20,51 +20,44 @@ st.set_page_config(
 if "rag" not in st.session_state:
     st.session_state.rag = RAGEngine()
 
+if "threads" not in st.session_state:
+    st.session_state.threads = {}
+
+if "current_thread" not in st.session_state:
+    st.session_state.current_thread = None
+
 if "files_hash" not in st.session_state:
     st.session_state.files_hash = None
 
 rag: RAGEngine = st.session_state.rag
 
 # ──────────────────────────────────────────────
-# SIDEBAR → CHAT + HISTORY
+# SIDEBAR → THREAD LIST (LIKE CHATGPT)
 # ──────────────────────────────────────────────
 with st.sidebar:
-    st.header("💬 Chat & History")
+    st.header("💬 Conversations")
 
-    # Show full history (chat + summary)
-    for msg in rag.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    # Chat input
-    query = st.chat_input("Ask about documents...")
-
-    if query:
-        rag.chat_history.append({"role": "user", "content": query})
-
-        with st.chat_message("user"):
-            st.markdown(query)
-
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            answer = ""
-
-            for token in rag.stream_answer(query):
-                answer += token
-                placeholder.markdown(answer + "▌")
-
-            placeholder.markdown(answer)
+    # New chat button
+    if st.button("➕ New Chat"):
+        thread_id = f"Chat {len(st.session_state.threads) + 1}"
+        st.session_state.threads[thread_id] = []
+        st.session_state.current_thread = thread_id
+        rag.chat_history = []
+        st.rerun()
 
     st.divider()
 
-    if st.button("🗑️ Clear History"):
-        rag.chat_history = []
-        st.rerun()
+    # Show threads
+    for thread in st.session_state.threads:
+        if st.button(thread):
+            st.session_state.current_thread = thread
+            rag.chat_history = st.session_state.threads[thread]
+            st.rerun()
 
 # ──────────────────────────────────────────────
 # MAIN PAGE
 # ──────────────────────────────────────────────
-st.title("📚 Multi-Document AI Summarizer")
+st.title("📚 Multi-Document AI Assistant")
 
 # Input choice
 option = st.radio(
@@ -73,9 +66,7 @@ option = st.radio(
     horizontal=True
 )
 
-# ──────────────────────────────────────────────
-# FILE UPLOAD
-# ──────────────────────────────────────────────
+# Upload
 if option == "📂 Upload Files":
     uploaded_files = st.file_uploader(
         "Upload documents",
@@ -90,18 +81,13 @@ if option == "📂 Upload Files":
             st.session_state.files_hash = new_hash
             rag.clear()
 
-            with st.spinner("🔍 Processing files..."):
+            with st.spinner("Processing..."):
                 rag.load_files(uploaded_files)
-                st.success("Files indexed successfully!")
+                st.success("Files loaded!")
 
-# ──────────────────────────────────────────────
-# TEXT INPUT
-# ──────────────────────────────────────────────
+# Text input
 else:
-    user_text = st.text_area(
-        "Paste your text here:",
-        height=200
-    )
+    user_text = st.text_area("Paste your text here:", height=200)
 
 # ──────────────────────────────────────────────
 # GENERATE SUMMARY
@@ -111,10 +97,15 @@ if st.button("📝 Generate Summary"):
     placeholder = st.empty()
     result = ""
 
-    # Handle text input
+    # Create new thread automatically
+    thread_id = f"Summary {len(st.session_state.threads) + 1}"
+    st.session_state.current_thread = thread_id
+    st.session_state.threads[thread_id] = []
+    rag.chat_history = st.session_state.threads[thread_id]
+
     if option == "✍️ Paste Text":
         if not user_text.strip():
-            st.warning("Please enter text.")
+            st.warning("Enter text")
             st.stop()
 
         rag.clear()
@@ -126,32 +117,69 @@ if st.button("📝 Generate Summary"):
 
     else:
         if not rag.chunks:
-            st.warning("Upload files first.")
+            st.warning("Upload files first")
             st.stop()
 
-    # Add user message (like ChatGPT)
+    # Store user message
     rag.chat_history.append({
         "role": "user",
         "content": "Generate summary"
     })
 
-    # STREAM SUMMARY (only once)
+    # Stream summary
     for token in rag.stream_summary():
         result += token
         placeholder.markdown(result + "▌")
 
     placeholder.markdown(result)
 
-    # Store summary in history (sidebar)
+    # Store assistant response
     rag.chat_history.append({
         "role": "assistant",
         "content": result
     })
 
-    # Download button
+    # Save thread
+    st.session_state.threads[thread_id] = rag.chat_history
+
+    # Download
     st.download_button(
-        label="⬇️ Download Summary",
+        "⬇️ Download Summary",
         data=result,
         file_name="summary.txt",
-        mime="text/plain",
     )
+
+# ──────────────────────────────────────────────
+# DISPLAY CURRENT THREAD
+# ──────────────────────────────────────────────
+if st.session_state.current_thread:
+    st.divider()
+
+    for msg in rag.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# ──────────────────────────────────────────────
+# CHAT INPUT (BOTTOM CENTER ✅)
+# ──────────────────────────────────────────────
+query = st.chat_input("Ask questions about your document...")
+
+if query and st.session_state.current_thread:
+
+    rag.chat_history.append({"role": "user", "content": query})
+
+    with st.chat_message("user"):
+        st.markdown(query)
+
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        answer = ""
+
+        for token in rag.stream_answer(query):
+            answer += token
+            placeholder.markdown(answer + "▌")
+
+        placeholder.markdown(answer)
+
+    # Save thread
+    st.session_state.threads[st.session_state.current_thread] = rag.chat_history
