@@ -1,6 +1,5 @@
-
 """
-app.py – Updated UI (Text input + Summary in main + Chat in sidebar)
+app.py – Clean UI (No duplicate output + Input choice + Upload in main)
 """
 
 import streamlit as st
@@ -30,12 +29,11 @@ if "summary_md" not in st.session_state:
 rag: RAGEngine = st.session_state.rag
 
 # ──────────────────────────────────────────────
-# SIDEBAR → CHAT + FILE UPLOAD
+# SIDEBAR → CHAT ONLY
 # ──────────────────────────────────────────────
 with st.sidebar:
     st.header("💬 Chat Assistant")
 
-    # Chat history
     for msg in rag.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -56,7 +54,26 @@ with st.sidebar:
 
     st.divider()
 
-    st.header("📂 Upload Files")
+    if st.button("🗑️ Clear Chat"):
+        rag.chat_history = []
+        st.rerun()
+
+# ──────────────────────────────────────────────
+# MAIN PAGE
+# ──────────────────────────────────────────────
+st.title("📚 Multi-Document AI Summarizer")
+
+# 🔹 USER CHOICE
+option = st.radio(
+    "Choose Input Method:",
+    ["📂 Upload Files", "✍️ Paste Text"],
+    horizontal=True
+)
+
+# ──────────────────────────────────────────────
+# OPTION 1 → FILE UPLOAD
+# ──────────────────────────────────────────────
+if option == "📂 Upload Files":
 
     uploaded_files = st.file_uploader(
         "Upload documents",
@@ -76,58 +93,60 @@ with st.sidebar:
                 rag.load_files(uploaded_files)
                 st.success("Files indexed successfully!")
 
-    st.divider()
-
-    if st.button("🗑️ Clear Chat"):
-        rag.chat_history = []
-        st.rerun()
+# ──────────────────────────────────────────────
+# OPTION 2 → TEXT INPUT
+# ──────────────────────────────────────────────
+else:
+    user_text = st.text_area(
+        "Paste your paragraph / content here:",
+        height=200
+    )
 
 # ──────────────────────────────────────────────
-# MAIN PAGE → SUMMARY + TEXT INPUT
+# GENERATE SUMMARY
 # ──────────────────────────────────────────────
-st.title("📚 Multi-Document AI Summarizer")
-
-# 🔹 TEXT INPUT OPTION
-st.subheader("✍️ Or Enter Text Manually")
-
-user_text = st.text_area(
-    "Paste your paragraph / content here:",
-    height=200
-)
-
 if st.button("📝 Generate Summary"):
-    if not rag.chunks and not user_text.strip():
-        st.warning("Upload files OR enter text.")
+
+    st.session_state.summary_md = ""
+    placeholder = st.empty()
+    result = ""
+
+    if option == "✍️ Paste Text":
+        if not user_text.strip():
+            st.warning("Please enter text.")
+            st.stop()
+
+        rag.clear()
+        rag.chunks = [{
+            "text": user_text,
+            "source": "User Input",
+            "page": 1
+        }]
+
     else:
-        st.session_state.summary_md = ""
-        placeholder = st.empty()
-        result = ""
+        if not rag.chunks:
+            st.warning("Upload files first.")
+            st.stop()
 
-        # 🔹 If user entered text → temporarily treat as document
-        if user_text.strip():
-            rag.clear()
-            rag.chunks = [{
-                "text": user_text,
-                "source": "User Input",
-                "page": 1
-            }]
+    # 🔹 STREAM SUMMARY (FIXED → NO DOUBLE PRINT)
+    for token in rag.stream_summary():
+        result += token
+        placeholder.markdown(result + "▌")
 
-        # 🔹 Generate summary
-        for token in rag.stream_summary():
-            result += token
-            placeholder.markdown(result + "▌")
+    st.session_state.summary_md = result
 
-        placeholder.markdown(result)
-        st.session_state.summary_md = result
-
-# 🔹 DISPLAY SUMMARY IN CENTER
+# ──────────────────────────────────────────────
+# DISPLAY SUMMARY (ONLY ONCE ✅)
+# ──────────────────────────────────────────────
 if st.session_state.summary_md:
     st.divider()
     st.subheader("📄 Summary Output")
     st.markdown(st.session_state.summary_md)
+
+    # ✅ Download button
     st.download_button(
-            label="⬇️ Download Summary",
-            data=st.session_state.summary_md,
-            file_name="summary.txt",
-            mime="text/plain",
-        )
+        label="⬇️ Download Summary",
+        data=st.session_state.summary_md,
+        file_name="summary.txt",
+        mime="text/plain",
+    )
