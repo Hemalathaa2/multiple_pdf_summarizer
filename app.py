@@ -47,11 +47,11 @@ with st.sidebar:
     st.header("📂 Document Upload")
 
     uploaded_files = st.file_uploader(
-        "Upload one or more PDFs",
-        type="pdf",
-        accept_multiple_files=True,
-        help="PDFs are processed locally — no data leaves your server.",
-    )
+    "Upload documents",
+    type=["pdf", "docx", "txt", "md", "csv", "pptx", "xlsx"],
+    accept_multiple_files=True,
+)
+       
 
     if uploaded_files:
         new_hash = tuple((f.name, f.size) for f in uploaded_files)
