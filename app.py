@@ -138,13 +138,9 @@ if st.button("📝 Generate Summary"):
 # ──────────────────────────────────────────────
 # DISPLAY SUMMARY (ONLY ONCE ✅)
 # ──────────────────────────────────────────────
-if st.session_state.summary_md:
-    st.divider()
-    st.subheader("📄 Summary Output")
-    st.markdown(st.session_state.summary_md)
 
     # ✅ Download button
-    st.download_button(
+st.download_button(
         label="⬇️ Download Summary",
         data=st.session_state.summary_md,
         file_name="summary.txt",
