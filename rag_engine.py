@@ -14,6 +14,7 @@ Supported input formats:
 import io
 import re
 import csv
+import time
 import numpy as np
 import torch
 import faiss
