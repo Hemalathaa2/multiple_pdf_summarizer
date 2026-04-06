@@ -70,13 +70,33 @@ def _clean(text: str) -> str:
 # ──────────────────────────────────────────────────────────────────
 
 def _extract_pdf(file) -> list:
+    import pytesseract
+    from PIL import Image
+
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
+
     pages = []
+
     for page_num, page in enumerate(doc):
-        text = _clean(page.get_text())
+        text = page.get_text().strip()
+
+        # 🔴 If normal extraction fails → use OCR
+        if len(text) < 50:
+            pix = page.get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            text = pytesseract.image_to_string(img)
+
+        text = _clean(text)
+
         if len(text) >= 40:
-            pages.append({"text": text, "source": file.name, "page": page_num + 1})
+            pages.append({
+                "text": text,
+                "source": file.name,
+                "page": page_num + 1
+            })
+
     return pages
 
 
