@@ -371,29 +371,29 @@ class RAGEngine:
 
     # ── Map-reduce summary  (reads the ENTIRE document) ───────────────
 
-    import time
+    
 
     def _call_llm(self, prompt: str, max_tokens: int = 700) -> str:
-        retries = 3
-        delay = 2  # seconds
-    
-        for attempt in range(retries):
-            try:
-                resp = self.client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
-                    max_tokens=max_tokens,
-                    stream=False,
-                )
-                return resp.choices[0].message.content or ""
-    
-            except Exception as e:
-                if attempt < retries - 1:
-                    time.sleep(delay)
-                    delay *= 2  # exponential backoff
-                else:
-                    return "⚠️ Rate limit reached. Please try again after a few seconds."
+      retries = 3
+      delay = 2  # seconds
+  
+      for attempt in range(retries):
+          try:
+              resp = self.client.chat.completions.create(
+                  model=LLM_MODEL,
+                  messages=[{"role": "user", "content": prompt}],
+                  temperature=0.2,
+                  max_tokens=max_tokens,
+                  stream=False,
+              )
+              return resp.choices[0].message.content or ""
+  
+          except Exception:
+              if attempt < retries - 1:
+                  time.sleep(delay)
+                  delay *= 2
+              else:
+                  return "⚠️ Rate limit reached. Please try again after a few seconds."
 
     @staticmethod
     def _normalise_bullets(raw: str) -> str:
