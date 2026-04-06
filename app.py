@@ -140,7 +140,7 @@ if st.button("📝 Generate Summary"):
 # ──────────────────────────────────────────────
 
     # ✅ Download button
-st.download_button(
+    st.download_button(
         label="⬇️ Download Summary",
         data=st.session_state.summary_md,
         file_name="summary.txt",
