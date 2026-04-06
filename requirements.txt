@@ -1,26 +1,20 @@
-# ── Core ──────────────────────────────────────────────────
+# Core
 streamlit>=1.35.0
 pymupdf>=1.24.0
 numpy>=1.26.0
 groq>=0.9.0
+
+# Embeddings and reranking
+sentence-transformers>=3.0.0
+torch>=2.3.0
+
+# Vector search  (swap to faiss-gpu on H100)
+faiss-cpu>=1.8.0
+
+# Document format parsers
 python-docx>=1.1.0
 python-pptx>=0.6.23
 openpyxl>=3.1.0
-# ── Embeddings & reranking ────────────────────────────────
-sentence-transformers>=3.0.0
-torch>=2.3.0           # pulls CUDA 12.x wheels automatically on H100
-torchvision>=0.18.0
 
-# ── Vector search ─────────────────────────────────────────
-# On H100: replace with faiss-gpu (pip install faiss-gpu)
-faiss-cpu>=1.8.0
-
-# ── Utilities ─────────────────────────────────────────────
+# Utilities
 scikit-learn>=1.5.0
-
-# ── Optional (remove if not needed) ───────────────────────
-# langchain>=0.2.0
-# langchain-community>=0.2.0
-# langchain-huggingface>=0.0.3
-# langchain-text-splitters>=0.2.0
-# ollama
