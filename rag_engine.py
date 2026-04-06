@@ -1,172 +1,322 @@
-import fitz
+"""
+rag_engine.py  –  Production-grade RAG engine
+Optimised for H100 deployment (CUDA-aware, batched encoding, FAISS IVF index)
+"""
+
+import re
 import numpy as np
-import requests
-import json
-from sentence_transformers import SentenceTransformer
+import torch
+import faiss
+import fitz                          # pymupdf
+import streamlit as st
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL_NAME = "gemma3:1b"
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from groq import Groq
+from typing import Generator, Optional
+
+# ──────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────
+EMBED_MODEL   = "all-MiniLM-L6-v2"          # bi-encoder  (fast retrieval)
+RERANK_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"   # cross-encoder (precision)
+LLM_MODEL     = "llama-3.1-8b-instant"
+
+CHUNK_SIZE    = 800    # characters  (larger = more context per chunk)
+OVERLAP       = 200    # character overlap between consecutive chunks
+TOP_K_FETCH   = 12     # candidates retrieved before reranking
+TOP_K_FINAL   = 5      # chunks sent to LLM after reranking
+BATCH_SIZE    = 64     # embedding batch size (tune for GPU VRAM)
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+# ──────────────────────────────────────────────
+# Helper – clean raw PDF text
+# ──────────────────────────────────────────────
+def _clean(text: str) -> str:
+    text = re.sub(r"\s+", " ", text)          # collapse whitespace
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)  # de-hyphenate line-breaks
+    return text.strip()
+
+
+# ──────────────────────────────────────────────
+# RAGEngine
+# ──────────────────────────────────────────────
 class RAGEngine:
 
     def __init__(self):
-        self.embedder = SentenceTransformer(
-            "all-MiniLM-L6-v2",
-            device="cpu"
-        )
+        self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-        self.chunks = []
-        self.embeddings = None
-        self.chat_history = []
+        # Bi-encoder for fast ANN retrieval
+        self.embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
+        self.embedder.max_seq_length = 512
 
-    # --------------------------------
-    # LOAD PDFs
-    # --------------------------------
-    def load_pdfs(self, files):
+        # Cross-encoder reranker for precision
+        self.reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
 
+        self.chunks: list[dict]       = []   # [{text, source, page}, ...]
+        self._faiss_index: faiss.Index | None = None
+        self.chat_history: list[dict] = []
+
+    # ────────────────────────────────────────
+    # Text splitting  (sliding-window)
+    # ────────────────────────────────────────
+    def _split_text(self, text: str) -> list[str]:
+        pieces, start = [], 0
+        while start < len(text):
+            end   = min(start + CHUNK_SIZE, len(text))
+            piece = text[start:end].strip()
+            if piece:
+                pieces.append(piece)
+            start += CHUNK_SIZE - OVERLAP
+        return pieces
+
+    # ────────────────────────────────────────
+    # Load PDFs
+    # ────────────────────────────────────────
+    def load_pdfs(self, files) -> None:
         self.chunks = []
 
         for file in files:
+            file.seek(0)
             doc = fitz.open(stream=file.read(), filetype="pdf")
 
             for page_num, page in enumerate(doc):
-                text = page.get_text().strip()
-
-                if not text:
+                raw = page.get_text()
+                text = _clean(raw)
+                if len(text) < 40:          # skip near-empty pages
                     continue
 
-                for chunk in self.split_text(text):
+                for chunk in self._split_text(text):
                     self.chunks.append({
-                        "text": chunk,
+                        "text":   chunk,
                         "source": file.name,
-                        "page": page_num + 1
+                        "page":   page_num + 1,
                     })
 
         if not self.chunks:
-            raise ValueError("No readable text found in PDFs.")
+            raise ValueError("No readable text found in the uploaded PDFs.")
 
+        self._build_index()
+
+    # ────────────────────────────────────────
+    # Build FAISS index (IVF for large corpora,
+    # FlatIP for small ones)
+    # ────────────────────────────────────────
+    def _build_index(self) -> None:
         texts = [c["text"] for c in self.chunks]
-
-        embeddings = self.embedder.encode(
+        vecs  = self.embedder.encode(
             texts,
-            show_progress_bar=True
-        )
+            batch_size=BATCH_SIZE,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        ).astype("float32")
 
-        # normalize embeddings
-    # STREAM CHAT ANSWER
-    # --------------------------------
-    def stream_answer(self, query):
+        dim = vecs.shape[1]
+        n   = len(vecs)
 
-        contexts = self.retrieve(query)
-        prompt = self.build_prompt(query, contexts)
+        if n >= 256:
+            # IVF index — good for 100 k+ chunks on H100
+            nlist = min(int(4 * np.sqrt(n)), n // 4)
+            quantiser = faiss.IndexFlatIP(dim)
+            index = faiss.IndexIVFFlat(quantiser, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+            index.train(vecs)
+            index.nprobe = max(8, nlist // 8)
+        else:
+            index = faiss.IndexFlatIP(dim)
 
-        payload = {
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": True
-        }
+        index.add(vecs)
 
-        response = requests.post(
-            OLLAMA_URL,
-            json=payload,
-            stream=True
-        )
-
-        full_text = ""
-
-        for line in response.iter_lines():
-
-            if not line:
-                continue
-
+        # Move to GPU if available (faiss-gpu)
+        if DEVICE == "cuda":
             try:
-                data = json.loads(line.decode("utf-8"))
-            except json.JSONDecodeError:
-                continue
+                res   = faiss.StandardGpuResources()
+                index = faiss.index_cpu_to_gpu(res, 0, index)
+            except Exception:
+                pass  # faiss-cpu only — stay on CPU
 
-            token = data.get("response", "")
-            full_text += token
+        self._faiss_index = index
+        self._embeddings  = vecs   # keep for reranker input shape
 
-            yield token, contexts
+    # ────────────────────────────────────────
+    # Retrieve  (ANN  →  cross-encoder rerank)
+    # ────────────────────────────────────────
+    def retrieve(
+        self,
+        query: str,
+        source_filter: Optional[str] = None,
+        top_k: int = TOP_K_FINAL,
+    ) -> list[dict]:
 
-        # save conversation memory
-        self.chat_history.append(f"User: {query}")
-        self.chat_history.append(f"Assistant: {full_text}")
+        if self._faiss_index is None or not self.chunks:
+            return []
 
-    # --------------------------------
-    # FOLLOW-UP QUERY UNDERSTANDING
-    # --------------------------------
-    def reformulate_query(self, query):
+        # 1. Encode query
+        q_vec = self.embedder.encode(
+            [query],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        ).astype("float32")
 
-        follow_words = [
-            "explain more",
-            "tell more",
-            "summarize that",
-            "why",
-            "how"
-        ]
+        # 2. ANN search – fetch more candidates when filtering by source
+        fetch_k = TOP_K_FETCH * 3 if source_filter else TOP_K_FETCH
+        fetch_k = min(fetch_k, len(self.chunks))
 
-        if any(w in query.lower() for w in follow_words):
+        _, idxs = self._faiss_index.search(q_vec, fetch_k)
+        candidates = [self.chunks[i] for i in idxs[0] if i < len(self.chunks)]
 
-            for msg in reversed(self.chat_history):
-                if msg.startswith("User:"):
-                    last_question = msg.replace("User:", "").strip()
-                    return f"{query} (regarding: {last_question})"
+        # 3. Source filter
+        if source_filter:
+            candidates = [c for c in candidates if c["source"] == source_filter]
+            if not candidates:
+                # fallback: search entire corpus
+                candidates = [self.chunks[i] for i in idxs[0] if i < len(self.chunks)]
 
-        return query
+        if not candidates:
+            return []
 
-    # --------------------------------
-    # STREAM DOCUMENT SUMMARY
-    # --------------------------------
-    def stream_summary(self):
+        # 4. Cross-encoder rerank
+        pairs  = [(query, c["text"]) for c in candidates]
+        scores = self.reranker.predict(pairs, show_progress_bar=False)
 
-        if not self.chunks:
-            yield "No PDFs loaded.", []
+        ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+        return [c for _, c in ranked[:top_k]]
+
+    # ────────────────────────────────────────
+    # Prompt builder
+    # ────────────────────────────────────────
+    @staticmethod
+    def _build_prompt(query: str, contexts: list[dict], history: list[dict]) -> list[dict]:
+        context_block = "\n\n---\n\n".join(
+            f"[Source: {c['source']}  |  Page {c['page']}]\n{c['text']}"
+            for c in contexts
+        )
+
+        system = (
+            "You are a precise document assistant. "
+            "Answer the user's question using ONLY the provided document excerpts. "
+            "If the answer is partially available, share what is found and note what is missing. "
+            "Never fabricate information. "
+            "Cite the source file and page number when relevant. "
+            "Be concise but complete."
+        )
+
+        # Build message list for multi-turn awareness
+        messages: list[dict] = [{"role": "system", "content": system}]
+
+        # Inject last 4 turns of history for continuity (keeps token budget low)
+        for turn in history[-8:]:
+            messages.append(turn)
+
+        user_msg = (
+            f"Document excerpts:\n{context_block}\n\n"
+            f"Question: {query}"
+        )
+        messages.append({"role": "user", "content": user_msg})
+        return messages
+
+    # ────────────────────────────────────────
+    # Streaming Q&A
+    # ────────────────────────────────────────
+    def stream_answer(
+        self,
+        query: str,
+        source_filter: Optional[str] = None,
+    ) -> Generator[str, None, None]:
+
+        contexts = self.retrieve(query, source_filter=source_filter)
+
+        if not contexts:
+            yield "⚠️ Could not retrieve relevant sections. Try rephrasing the question."
             return
 
-        texts = [c["text"] for c in self.chunks[:15]]
-        context_text = "\n\n".join(texts)
+        messages = self._build_prompt(query, contexts, self.chat_history)
 
-        prompt = f"""
-You are an expert document analyst.
-
-Provide a structured summary including:
-- Main topics
-- Key insights
-- Important findings
-- Conclusion
-
-Document Content:
-{context_text}
-"""
-
-        payload = {
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": True
-        }
-
-        response = requests.post(
-            OLLAMA_URL,
-            json=payload,
-            stream=True
+        stream = self.client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            temperature=0.1,        # low = factual, consistent
+            max_tokens=1024,
+            stream=True,
         )
 
         full_text = ""
+        for chunk in stream:
+            token = getattr(chunk.choices[0].delta, "content", "") or ""
+            if token:
+                full_text += token
+                yield token
 
-        for line in response.iter_lines():
+        # Persist history (without system / context to save tokens)
+        self.chat_history.append({"role": "user",      "content": query})
+        self.chat_history.append({"role": "assistant", "content": full_text})
 
-            if not line:
-                continue
+    # ────────────────────────────────────────
+    # Streaming summary  (per document)
+    # ────────────────────────────────────────
+    def stream_summary(self) -> Generator[str, None, None]:
+        if not self.chunks:
+            yield "⚠️ No documents loaded."
+            return
 
-            try:
-                data = json.loads(line.decode("utf-8"))
-            except:
-                continue
+        # Group chunks by source
+        docs: dict[str, list[str]] = {}
+        for c in self.chunks:
+            docs.setdefault(c["source"], []).append(c["text"])
 
-            token = data.get("response", "")
-            full_text += token
+        for filename, texts in docs.items():
+            yield f"\n\n### 📄 {filename}\n\n"
 
-            yield token, self.chunks[:3]
+            # Use first ~4 000 chars for summarisation
+            collected = ""
+            for t in texts:
+                if len(collected) > 4000:
+                    break
+                collected += t + "\n"
 
+            prompt = (
+                "Produce a concise bullet-point summary of the following text.\n"
+                "Rules:\n"
+                "- Use '-' bullets only\n"
+                "- 6–10 points\n"
+                "- Each point: one clear, informative sentence\n"
+                "- No headers, no paragraphs\n\n"
+                f"TEXT:\n{collected}"
+            )
+
+            stream = self.client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=700,
+                stream=True,
+            )
+
+            raw = ""
+            for chunk in stream:
+                token = getattr(chunk.choices[0].delta, "content", "") or ""
+                raw += token
+
+            # Normalise bullets
+            lines = []
+            for line in raw.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                line = re.sub(r"^[\*\•\–\—\d+\.\)]+\s*", "", line)
+                lines.append(f"- {line}")
+
+            yield "\n".join(lines)
+
+    # ────────────────────────────────────────
+    # Utility
+    # ────────────────────────────────────────
+    def clear(self) -> None:
+        self.chunks        = []
+        self._faiss_index  = None
+        self.chat_history  = []
+
+    @property
+    def source_list(self) -> list[str]:
+        return sorted({c["source"] for c in self.chunks})
