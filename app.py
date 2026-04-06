@@ -47,11 +47,11 @@ with st.sidebar:
     st.header("📂 Document Upload")
 
     uploaded_files = st.file_uploader(
-    "Upload documents",
-    type=["pdf", "docx", "txt", "md", "csv", "pptx", "xlsx"],
-    accept_multiple_files=True,
-)
-       
+        "Upload documents (PDF, DOCX, TXT, CSV, PPTX, XLSX)",
+        type=["pdf", "docx", "txt", "md", "csv", "pptx", "xlsx"],
+        accept_multiple_files=True,
+        help="All processing happens on your server — no data is sent externally.",
+    )
 
     if uploaded_files:
         new_hash = tuple((f.name, f.size) for f in uploaded_files)
@@ -63,7 +63,7 @@ with st.sidebar:
 
             with st.spinner("🔍 Parsing & indexing PDFs…"):
                 try:
-                    rag.load_pdfs(uploaded_files)
+                    rag.load_files(uploaded_files)
                     st.success(
                         f"✅ Indexed **{len(rag.chunks)}** chunks "
                         f"from **{len(rag.source_list)}** file(s)."
