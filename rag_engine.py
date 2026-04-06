@@ -32,8 +32,8 @@ EMBED_MODEL  = "all-MiniLM-L6-v2"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 LLM_MODEL    = "llama-3.1-8b-instant"
 
-CHUNK_SIZE  = 800    # characters per RAG chunk
-OVERLAP     = 200    # overlap between adjacent chunks
+CHUNK_SIZE  = 1500    # characters per RAG chunk
+OVERLAP     = 300    # overlap between adjacent chunks
 TOP_K_FETCH = 12     # ANN candidates before reranking
 TOP_K_FINAL = 5      # chunks sent to LLM after reranking
 BATCH_SIZE  = 64     # embedding batch size (set to 256 on H100)
@@ -54,8 +54,13 @@ SUPPORTED_EXTENSIONS = {
 # Text cleaning
 # ──────────────────────────────────────────────────────────────────
 def _clean(text: str) -> str:
-    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)   # de-hyphenate line-breaks
-    text = re.sub(r"\s+", " ", text)                     # collapse whitespace
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    # REMOVE weird characters (IMPORTANT)
+    text = re.sub(r"[^a-zA-Z0-9.,()\- ]", " ", text)
+
     return text.strip()
 
 
@@ -410,15 +415,14 @@ class RAGEngine:
     def _map_batch(self, batch_text: str, batch_num: int, total: int) -> str:
         """MAP step: summarise one 12 000-char section into bullet points."""
         prompt = (
-            f"You are reading section {batch_num} of {total} from a document.\n"
-            "Summarise ONLY the key information in this section as bullet points.\n"
-            "Rules:\n"
-            "- 4 to 7 bullets\n"
-            "- Each bullet: one concise, factual sentence\n"
-            "- Preserve important names, numbers, dates, and findings\n"
-            "- No headers, no preamble\n\n"
-            f"TEXT:\n{batch_text}"
-        )
+    f"You are summarizing handwritten Python notes.\n"
+    "The text may contain OCR errors. Infer the correct meaning.\n\n"
+    "Summarise the key topics clearly.\n"
+    "- Focus on concepts (operators, loops, functions, etc.)\n"
+    "- Ignore spelling mistakes\n"
+    "- 5 to 7 bullet points\n\n"
+    f"TEXT:\n{batch_text}"
+)
         return self._call_llm(prompt, max_tokens=500)
 
     def _reduce_summaries(self, partial_summaries: str, filename: str) -> str:
@@ -459,7 +463,7 @@ class RAGEngine:
         for filename, texts in docs.items():
             yield f"\n\n### {filename}\n\n"
 
-            full_text   = " ".join(texts)
+            full_text = " ".join(texts)[:100000]
             total_chars = len(full_text)
 
             # Build batches
