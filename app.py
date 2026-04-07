@@ -199,4 +199,4 @@ if query and st.session_state.current_thread:
 
 # FOOTER
 st.markdown("---")
-st.markdown("🚀 Built with Streamlit | SmartDoc AI")
+st.markdown(" Ask any question")
