@@ -1,232 +1,214 @@
+# =========================
+# rag_engine.py (ONLY NECESSARY CHANGE APPLIED)
+# =========================
+
+"""
+rag_engine.py - Production-grade RAG engine
+"""
+
+import io
+import re
+import csv
+import time
+import numpy as np
+import torch
+import faiss
+import fitz
 import streamlit as st
-from rag_engine import RAGEngine
+
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from groq import Groq
+from typing import Generator, Optional
 
 # ──────────────────────────────────────────────
-# PAGE CONFIG
+# Constants
 # ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="SmartDoc AI",
-    page_icon="📄",
-    layout="wide",
-)
+EMBED_MODEL = "all-MiniLM-L6-v2"
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+LLM_MODEL = "llama-3.1-8b-instant"
 
-# ──────────────────────────────────────────────
-# UI STYLES (DARK MODE SAFE)
-# ──────────────────────────────────────────────
-st.markdown("""
-<style>
-.main-title {
-    font-size: 34px;
-    font-weight: 800;
-    color: #6366f1;
-}
-.sub-title {
-    font-size: 16px;
-    opacity: 0.7;
-    margin-bottom: 20px;
-}
-.block {
-    padding: 14px;
-    border-radius: 12px;
-    margin-bottom: 10px;
-    background: rgba(120,120,120,0.08);
-    color: inherit;
-}
-.user {
-    background: rgba(59,130,246,0.15);
-}
-.bot {
-    background: rgba(139,92,246,0.15);
-}
-.stButton>button {
-    border-radius: 10px;
-    height: 50px;
-    font-weight: 600;
-    background: linear-gradient(90deg, #6366f1, #8b5cf6);
-    color: white;
-}
-</style>
-""", unsafe_allow_html=True)
+CHUNK_SIZE = 1500
+OVERLAP = 300
+TOP_K_FETCH = 12
+TOP_K_FINAL = 5
+BATCH_SIZE = 64
 
-st.markdown('<div class="main-title">📄 SmartDoc AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Summarise & Chat with Documents</div>', unsafe_allow_html=True)
+SUMMARY_BATCH_CHARS = 20000
+SUMMARY_MAX_BATCHES = 60
+SUMMARY_REDUCE_LIMIT = 18000
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ──────────────────────────────────────────────
-# SESSION STATE
+# CLEAN TEXT
 # ──────────────────────────────────────────────
-if "rag" not in st.session_state:
-    st.session_state.rag = RAGEngine()
-
-if "threads" not in st.session_state:
-    st.session_state.threads = {}
-
-if "current_thread" not in st.session_state:
-    st.session_state.current_thread = None
-
-if "files_hash" not in st.session_state:
-    st.session_state.files_hash = None
-
-if "input_mode" not in st.session_state:
-    st.session_state.input_mode = "upload"
-
-rag = st.session_state.rag
+def _clean(text: str) -> str:
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-zA-Z0-9.,()\- ]", " ", text)
+    return text.strip()
 
 # ──────────────────────────────────────────────
-# SIDEBAR
+# FILE EXTRACTORS
 # ──────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 💬 Workspace")
+def _extract_pdf(file):
+    file.seek(0)
+    doc = fitz.open(stream=file.read(), filetype="pdf")
 
-    if st.button("➕ New Chat"):
-        thread_id = f"Chat {len(st.session_state.threads) + 1}"
-        st.session_state.threads[thread_id] = []
-        st.session_state.current_thread = thread_id
-        rag.chat_history = []
-        st.rerun()
+    pages = []
+    for i, page in enumerate(doc):
+        text = _clean(page.get_text())
 
-    st.divider()
+        if len(text) >= 40:
+            pages.append({
+                "text": text,
+                "source": file.name,
+                "page": i + 1
+            })
 
-    for thread in st.session_state.threads:
-        if st.button(thread):
-            st.session_state.current_thread = thread
-            rag.chat_history = st.session_state.threads[thread]
-            st.rerun()
+    return pages
 
-# ──────────────────────────────────────────────
-# INPUT MODE
-# ──────────────────────────────────────────────
-col1, col2 = st.columns(2)
 
-with col1:
-    if st.button("📂 Upload Files", use_container_width=True):
-        st.session_state.input_mode = "upload"
+def extract_pages(file):
+    name = file.name.lower()
 
-with col2:
-    if st.button("✍️ Paste Text", use_container_width=True):
-        st.session_state.input_mode = "text"
+    if name.endswith(".pdf"):
+        return _extract_pdf(file)
 
-option = st.session_state.input_mode
+    raise ValueError(f"Unsupported file type: {file.name}")
 
 # ──────────────────────────────────────────────
-# FILE UPLOAD
+# RAG ENGINE
 # ──────────────────────────────────────────────
-if option == "upload":
-    uploaded_files = st.file_uploader(
-        "Upload documents",
-        type=["pdf", "docx", "txt", "md", "csv", "pptx", "xlsx"],
-        accept_multiple_files=True,
-    )
+class RAGEngine:
 
-    if uploaded_files:
-        new_hash = tuple((f.name, f.size) for f in uploaded_files)
+    def __init__(self):
+        self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+        self.embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
+        self.reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
 
-        if new_hash != st.session_state.files_hash:
-            st.session_state.files_hash = new_hash
-            rag.clear()
+        self.chunks = []
+        self._faiss_index = None
+        self.chat_history = []
 
-            with st.spinner("Processing..."):
-                rag.load_files(uploaded_files)
-                st.success("Files loaded!")
+    def _split_text(self, text):
+        chunks = []
+        i = 0
 
-# ──────────────────────────────────────────────
-# TEXT INPUT
-# ──────────────────────────────────────────────
-else:
-    user_text = st.text_area("Paste your text here:", height=200)
+        while i < len(text):
+            chunks.append(text[i:i + CHUNK_SIZE])
+            i += CHUNK_SIZE - OVERLAP
 
-# ──────────────────────────────────────────────
-# GENERATE SUMMARY
-# ──────────────────────────────────────────────
-if st.button("📝 Generate Summary"):
+        return chunks
 
-    result = ""
-    placeholder = st.empty()
+    def load_files(self, files):
+        self.chunks = []
 
-    # Create thread
-    thread_id = f"Summary {len(st.session_state.threads) + 1}"
-    st.session_state.current_thread = thread_id
-    st.session_state.threads[thread_id] = []
-    rag.chat_history = st.session_state.threads[thread_id]
+        for file in files:
+            pages = extract_pages(file)
 
-    # Input handling
-    if option == "text":
-        if not user_text.strip():
-            st.warning("Enter text")
-            st.stop()
+            for p in pages:
+                for c in self._split_text(p["text"]):
+                    self.chunks.append({
+                        "text": c,
+                        "source": p["source"],
+                        "page": p["page"]
+                    })
 
-        rag.clear()
-        rag.chunks = [{
-            "text": user_text,
-            "source": "User Input",
-            "page": 1
-        }]
-    else:
-        if not rag.chunks:
-            st.warning("Upload files first")
-            st.stop()
+        self._build_index()
 
-    rag.chat_history.append({"role": "user", "content": "Generate summary"})
+    def _build_index(self):
+        texts = [c["text"] for c in self.chunks]
 
-    # Streaming (temporary only)
-    for token in rag.stream_summary():
-        result += token
-        placeholder.markdown(result + "▌")
+        vecs = self.embedder.encode(
+            texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        ).astype("float32")
 
-    placeholder.empty()
+        index = faiss.IndexFlatIP(vecs.shape[1])
+        index.add(vecs)
 
-    # Save final summary
-    rag.chat_history.append({
-        "role": "assistant",
-        "content": result
-    })
+        self._faiss_index = index
 
-    st.download_button("⬇️ Download Summary", data=result, file_name="summary.txt")
+    def retrieve(self, query):
+        if self._faiss_index is None:
+            return []
 
-# ──────────────────────────────────────────────
-# DISPLAY CHAT
-# ──────────────────────────────────────────────
-if st.session_state.current_thread:
-    st.divider()
+        q = self.embedder.encode([query], normalize_embeddings=True).astype("float32")
+        _, idx = self._faiss_index.search(q, TOP_K_FINAL)
 
-    for msg in rag.chat_history:
-        if msg["role"] == "user":
-            st.markdown(
-                f'<div class="block user">{msg["content"]}</div>',
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown(
-                f'<div class="block bot">{msg["content"]}</div>',
-                unsafe_allow_html=True
+        return [self.chunks[i] for i in idx[0]]
+
+    def _call_llm(self, prompt, max_tokens=700):
+        try:
+            response = self.client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": prompt[:12000]}],
+                max_tokens=max_tokens,
+                temperature=0.2,
             )
 
-# ──────────────────────────────────────────────
-# CHAT INPUT
-# ──────────────────────────────────────────────
-query = st.chat_input("Ask something about your document...")
+            return response.choices[0].message.content or ""
 
-if query and st.session_state.current_thread:
+        except Exception:
+            return "⚠️ API error"
 
-    rag.chat_history.append({"role": "user", "content": query})
+    def stream_answer(self, query) -> Generator[str, None, None]:
 
-    answer = ""
-    placeholder = st.empty()
+        contexts = self.retrieve(query)
 
-    for token in rag.stream_answer(query):
-        answer += token
-        placeholder.markdown(answer + "▌")
+        if not contexts:
+            yield "No relevant info found."
+            return
 
-    placeholder.empty()
+        context = "\n".join([c["text"] for c in contexts])[:5000]
 
-    rag.chat_history.append({
-        "role": "assistant",
-        "content": answer
-    })
+        prompt = f"Answer using this:\n{context}\n\nQ: {query}"
 
-    st.session_state.threads[st.session_state.current_thread] = rag.chat_history
+        answer = self._call_llm(prompt, 600)
 
-# ──────────────────────────────────────────────
-# FOOTER
-# ──────────────────────────────────────────────
-st.markdown("---")
-st.markdown("✨ Built with SmartDoc AI")
+        for word in answer.split():
+            yield word + " "
+
+    # ✅ ONLY FIXED FUNCTION
+    def stream_summary(self):
+
+        if not self.chunks:
+            yield "No document."
+            return
+
+        # GROUP BY FILE
+        by_source = {}
+        for c in self.chunks:
+            by_source.setdefault(c["source"], []).append(c["text"])
+
+        summaries = []
+
+        # SUMMARIZE EACH FILE
+        for source, texts in by_source.items():
+            yield f"🔹 Processing {source}...\n"
+
+            combined_text = " ".join(texts)[:8000]
+
+            prompt = "Summarize this document in 5 bullet points:\n" + combined_text
+            summary = self._call_llm(prompt, 300)
+
+            summaries.append(f"Summary of {source}:\n{summary}")
+
+        yield "\n🔹 Generating final summary...\n"
+
+        combined = "\n\n".join(summaries)[:SUMMARY_REDUCE_LIMIT]
+
+        final = self._call_llm(
+            "Combine all document summaries into one final summary covering ALL topics:\n" + combined,
+            400
+        )
+
+        yield final
+
+    def clear(self):
+        self.chunks = []
+        self._faiss_index = None
+        self.chat_history = []
