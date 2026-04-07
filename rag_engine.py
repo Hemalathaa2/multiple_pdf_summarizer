@@ -312,19 +312,41 @@ class RAGEngine:
             yield token
 
     def stream_summary(self):
-        full_text = " ".join([c["text"] for c in self.chunks])[:60000]
-
-        prompt = f"Summarize:\n{full_text}"
-
-        response = self.client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            stream=True,
-        )
-
-        for chunk in response:
-            token = getattr(chunk.choices[0].delta, "content", "") or ""
-            yield token
+        if not self.chunks:
+            yield "No documents loaded."
+            return
+    
+        full_text = " ".join([c["text"] for c in self.chunks])[:50000]
+    
+        prompt = f"Summarize the following document clearly:\n{full_text}"
+    
+        retries = 3
+        delay = 2
+    
+        for attempt in range(retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=True,
+                    max_tokens=800,
+                    temperature=0.3,
+                )
+    
+                for chunk in response:
+                    token = getattr(chunk.choices[0].delta, "content", "") or ""
+                    if token:
+                        yield token
+    
+                return  # success → exit
+    
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    yield "⚠️ Retrying...\n"
+                else:
+                    yield "❌ Groq API error. Please try again after a few seconds."
 
     def clear(self):
         self.chunks = []
