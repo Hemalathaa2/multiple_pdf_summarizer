@@ -14,13 +14,13 @@ from groq import Groq
 from typing import Generator
 
 # ──────────────────────────────────────────────
-# GLOBAL LOCKS (MULTI-USER SAFE)
+# GLOBAL LOCKS
 # ──────────────────────────────────────────────
 api_lock = threading.Lock()
 index_lock = threading.Lock()
 
 # ──────────────────────────────────────────────
-# CONSTANTS (OPTIMIZED)
+# CONSTANTS
 # ──────────────────────────────────────────────
 EMBED_MODEL = "all-MiniLM-L6-v2"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -30,14 +30,13 @@ CHUNK_SIZE = 1200
 OVERLAP = 200
 TOP_K = 5
 
-# 🔥 SAFE LIMITS (NO API CRASH)
-SUMMARY_BATCH_CHARS = 8000
-MAX_INPUT_SIZE = 25000
+SUMMARY_BATCH_CHARS = 6000
+MAX_INPUT_SIZE = 20000
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ──────────────────────────────────────────────
-# CACHE MODELS
+# LOAD MODELS (CACHED)
 # ──────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_models():
@@ -55,7 +54,7 @@ def _clean(text):
     return text.strip()
 
 # ──────────────────────────────────────────────
-# PDF EXTRACT (FAST + SAFE)
+# PDF EXTRACT
 # ──────────────────────────────────────────────
 def extract_pdf(file):
     file.seek(0)
@@ -86,8 +85,6 @@ class RAGEngine:
         self.chat_history = []
 
     # ──────────────────────────────────────────
-    # SPLIT TEXT
-    # ──────────────────────────────────────────
     def _split(self, text):
         chunks = []
         i = 0
@@ -96,8 +93,6 @@ class RAGEngine:
             i += CHUNK_SIZE - OVERLAP
         return chunks
 
-    # ──────────────────────────────────────────
-    # LOAD FILES
     # ──────────────────────────────────────────
     def load_files(self, files):
         self.chunks = []
@@ -117,8 +112,6 @@ class RAGEngine:
             self._build_index()
 
     # ──────────────────────────────────────────
-    # BUILD INDEX
-    # ──────────────────────────────────────────
     def _build_index(self):
         texts = [c["text"] for c in self.chunks]
 
@@ -133,8 +126,6 @@ class RAGEngine:
         self.index = index
 
     # ──────────────────────────────────────────
-    # RETRIEVE
-    # ──────────────────────────────────────────
     def retrieve(self, query):
         if self.index is None:
             return []
@@ -145,33 +136,33 @@ class RAGEngine:
         return [self.chunks[i] for i in idx[0]]
 
     # ──────────────────────────────────────────
-    # SAFE API CALL
-    # ──────────────────────────────────────────def _safe_llm(self, prompt, max_tokens=500):
-
-    retries = 2  # reduce retries → avoid rate limit loop
-    delay = 2
-
-    for attempt in range(retries):
-        try:
-            time.sleep(1)
-
-            with api_lock:
-                response = self.client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[{"role": "user", "content": prompt[:12000]}],
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                    stream=False
-                )
-
-            return response.choices[0].message.content or ""
-
-        except Exception:
-            time.sleep(delay)
-
-    return "⚠️ Server busy"
+    # SAFE API CALL (FIXED ✅)
     # ──────────────────────────────────────────
-    # STREAM ANSWER
+    def _safe_llm(self, prompt, max_tokens=500):
+
+        retries = 2
+        delay = 2
+
+        for attempt in range(retries):
+            try:
+                time.sleep(1)
+
+                with api_lock:
+                    response = self.client.chat.completions.create(
+                        model=LLM_MODEL,
+                        messages=[{"role": "user", "content": prompt[:12000]}],
+                        max_tokens=max_tokens,
+                        temperature=0.3,
+                        stream=False
+                    )
+
+                return response.choices[0].message.content or ""
+
+            except Exception:
+                time.sleep(delay)
+
+        return "⚠️ Server busy"
+
     # ──────────────────────────────────────────
     def stream_answer(self, query) -> Generator[str, None, None]:
 
@@ -182,8 +173,7 @@ class RAGEngine:
             return
 
         context = "\n".join([c["text"] for c in contexts])[:5000]
-
-        prompt = f"Answer using this:\n{context}\n\nQ: {query}"
+        prompt = "Answer using this:\n" + context + "\n\nQ: " + query
 
         answer = self._safe_llm(prompt, 600)
 
@@ -191,52 +181,37 @@ class RAGEngine:
             yield word + " "
 
     # ──────────────────────────────────────────
-    # MAP REDUCE SUMMARY (🔥 STABLE)
-    # ──────────────────────────────────────────
     def stream_summary(self):
-    
+
         if not self.chunks:
             yield "No document."
             return
-    
-        full_text = " ".join([c["text"] for c in self.chunks])[:20000]
-    
-        # 🔹 Split into smaller safe chunks
+
+        full_text = " ".join([c["text"] for c in self.chunks])[:MAX_INPUT_SIZE]
+
         batches = [
-            full_text[i:i+6000]
-            for i in range(0, len(full_text), 6000)
+            full_text[i:i+SUMMARY_BATCH_CHARS]
+            for i in range(0, len(full_text), SUMMARY_BATCH_CHARS)
         ]
-    
+
         summaries = []
-    
-        # 🔹 LIMIT API CALLS (MAX 3)
         max_batches = min(len(batches), 3)
-    
+
         for i in range(max_batches):
             yield f"🔹 Processing part {i+1}/{max_batches}...\n"
-    
-            prompt = f"""
-            Summarize clearly in 5 bullet points:
-            {batches[i]}
-            """
-    
+
+            prompt = "Summarize in 5 bullet points:\n" + batches[i]
             summary = self._safe_llm(prompt, 250)
+
             summaries.append(summary)
-    
-        # 🔹 FINAL MERGE (SAFE)
+
         yield "\n🔹 Generating final summary...\n"
-    
+
         combined = "\n".join(summaries)[:8000]
-    
-        final_prompt = f"""
-        Combine these into a final summary (8–10 bullets, clear and concise):
-    
-        {combined}
-        """
-    
+        final_prompt = "Combine into final summary (8–10 bullets):\n" + combined
+
         final = self._safe_llm(final_prompt, 400)
-    
-        # 🔴 FALLBACK (VERY IMPORTANT)
+
         if "⚠️" in final or len(final.strip()) < 20:
             yield "\n⚠️ Showing partial summary (server busy):\n\n"
             yield combined
