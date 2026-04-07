@@ -146,33 +146,30 @@ class RAGEngine:
 
     # ──────────────────────────────────────────
     # SAFE API CALL
-    # ──────────────────────────────────────────
-    def _safe_llm(self, prompt, max_tokens=500):
+    # ──────────────────────────────────────────def _safe_llm(self, prompt, max_tokens=500):
 
-        retries = 3
-        delay = 2
+    retries = 2  # reduce retries → avoid rate limit loop
+    delay = 2
 
-        for attempt in range(retries):
-            try:
-                time.sleep(1)
+    for attempt in range(retries):
+        try:
+            time.sleep(1)
 
-                with api_lock:
-                    response = self.client.chat.completions.create(
-                        model=LLM_MODEL,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=max_tokens,
-                        temperature=0.3,
-                        stream=False
-                    )
+            with api_lock:
+                response = self.client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=[{"role": "user", "content": prompt[:12000]}],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                    stream=False
+                )
 
-                return response.choices[0].message.content
+            return response.choices[0].message.content or ""
 
-            except Exception:
-                time.sleep(delay)
-                delay *= 2
+        except Exception:
+            time.sleep(delay)
 
-        return "⚠️ Server busy. Try again in a few seconds."
-
+    return "⚠️ Server busy"
     # ──────────────────────────────────────────
     # STREAM ANSWER
     # ──────────────────────────────────────────
@@ -197,39 +194,54 @@ class RAGEngine:
     # MAP REDUCE SUMMARY (🔥 STABLE)
     # ──────────────────────────────────────────
     def stream_summary(self):
-
+    
         if not self.chunks:
             yield "No document."
             return
-
-        full_text = " ".join([c["text"] for c in self.chunks])[:MAX_INPUT_SIZE]
-
-        # 🔹 STEP 1: SPLIT INTO SAFE BATCHES
+    
+        full_text = " ".join([c["text"] for c in self.chunks])[:20000]
+    
+        # 🔹 Split into smaller safe chunks
         batches = [
-            full_text[i:i+SUMMARY_BATCH_CHARS]
-            for i in range(0, len(full_text), SUMMARY_BATCH_CHARS)
+            full_text[i:i+6000]
+            for i in range(0, len(full_text), 6000)
         ]
-
-        partials = []
-
-        # 🔹 STEP 2: MAP
-        for i, batch in enumerate(batches, 1):
-            yield f"🔹 Processing part {i}/{len(batches)}...\n"
-
-            prompt = f"Summarize in 5 bullet points:\n{batch}"
-            summary = self._safe_llm(prompt, 300)
-
-            partials.append(summary)
-
-        # 🔹 STEP 3: REDUCE
-        yield "\n🔹 Final summary...\n"
-
-        combined = "\n".join(partials)[:10000]
-
-        final_prompt = f"Combine into final summary (8–12 bullets):\n{combined}"
-        final = self._safe_llm(final_prompt, 600)
-
-        yield final
+    
+        summaries = []
+    
+        # 🔹 LIMIT API CALLS (MAX 3)
+        max_batches = min(len(batches), 3)
+    
+        for i in range(max_batches):
+            yield f"🔹 Processing part {i+1}/{max_batches}...\n"
+    
+            prompt = f"""
+            Summarize clearly in 5 bullet points:
+            {batches[i]}
+            """
+    
+            summary = self._safe_llm(prompt, 250)
+            summaries.append(summary)
+    
+        # 🔹 FINAL MERGE (SAFE)
+        yield "\n🔹 Generating final summary...\n"
+    
+        combined = "\n".join(summaries)[:8000]
+    
+        final_prompt = f"""
+        Combine these into a final summary (8–10 bullets, clear and concise):
+    
+        {combined}
+        """
+    
+        final = self._safe_llm(final_prompt, 400)
+    
+        # 🔴 FALLBACK (VERY IMPORTANT)
+        if "⚠️" in final or len(final.strip()) < 20:
+            yield "\n⚠️ Showing partial summary (server busy):\n\n"
+            yield combined
+        else:
+            yield final
 
     # ──────────────────────────────────────────
     def clear(self):
