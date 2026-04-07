@@ -2,223 +2,77 @@ import io
 import re
 import csv
 import time
+import threading
 import numpy as np
 import torch
 import faiss
 import fitz
 import streamlit as st
-import threading
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from groq import Groq
-from typing import Generator, Optional
+from typing import Generator
 
 # ──────────────────────────────────────────────
-# GLOBAL LOCK (MULTI-USER SAFETY)
+# GLOBAL LOCKS (MULTI-USER SAFE)
 # ──────────────────────────────────────────────
-lock = threading.Lock()
+api_lock = threading.Lock()
+index_lock = threading.Lock()
 
 # ──────────────────────────────────────────────
-# CONSTANTS
+# CONSTANTS (OPTIMIZED)
 # ──────────────────────────────────────────────
-EMBED_MODEL  = "all-MiniLM-L6-v2"
+EMBED_MODEL = "all-MiniLM-L6-v2"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-LLM_MODEL    = "llama-3.1-8b-instant"
+LLM_MODEL = "llama3-8b-8192"
 
-CHUNK_SIZE  = 1500
-OVERLAP     = 300
-TOP_K_FETCH = 12
-TOP_K_FINAL = 5
-BATCH_SIZE  = 64
+CHUNK_SIZE = 1200
+OVERLAP = 200
+TOP_K = 5
 
-SUMMARY_BATCH_CHARS  = 20000
-SUMMARY_MAX_BATCHES  = 60
-SUMMARY_REDUCE_LIMIT = 18000
+# 🔥 SAFE LIMITS (NO API CRASH)
+SUMMARY_BATCH_CHARS = 8000
+MAX_INPUT_SIZE = 25000
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ──────────────────────────────────────────────
-# MODEL CACHING (🔥 IMPORTANT)
+# CACHE MODELS
 # ──────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_models():
     embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
-    embedder.max_seq_length = 512
     reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     return embedder, reranker, client
 
 # ──────────────────────────────────────────────
-# TEXT CLEANING
+# CLEAN TEXT
 # ──────────────────────────────────────────────
-def _clean(text: str) -> str:
-    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
-    text = re.sub(r"\n+", " ", text)
+def _clean(text):
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"[^a-zA-Z0-9.,()\- ]", " ", text)
     return text.strip()
 
 # ──────────────────────────────────────────────
-# FILE EXTRACTORS
+# PDF EXTRACT (FAST + SAFE)
 # ──────────────────────────────────────────────
-def _extract_pdf(file):
-    import pytesseract
-    from PIL import Image
-
+def extract_pdf(file):
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
+
     pages = []
+    for i, page in enumerate(doc):
+        text = _clean(page.get_text())
 
-    for page_num, page in enumerate(doc):
-        text = page.get_text().strip()
-
-        # 🔥 OCR OPTIMIZED
-        if len(text.strip()) < 20 and page_num < 10:
-            pix = page.get_pixmap()
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            text = pytesseract.image_to_string(img)
-
-        text = _clean(text)
-
-        if len(text) >= 40:
+        if len(text) > 40:
             pages.append({
                 "text": text,
                 "source": file.name,
-                "page": page_num + 1
+                "page": i + 1
             })
 
     return pages
-
-
-def _extract_docx(file):
-    from docx import Document
-    file.seek(0)
-    doc = Document(file)
-
-    pages, buf, page_num = [], [], 1
-
-    for para in doc.paragraphs:
-        t = para.text.strip()
-        if not t:
-            continue
-        buf.append(t)
-
-        if len(buf) >= 40:
-            pages.append({"text": _clean(" ".join(buf)),
-                          "source": file.name, "page": page_num})
-            page_num += 1
-            buf = []
-
-    if buf:
-        pages.append({"text": _clean(" ".join(buf)),
-                      "source": file.name, "page": page_num})
-
-    return pages
-
-
-def _extract_txt(file):
-    file.seek(0)
-    raw = file.read().decode("utf-8", errors="replace")
-    lines = raw.splitlines()
-
-    pages, buf, page_num = [], [], 1
-
-    for line in lines:
-        buf.append(line)
-
-        if len(buf) >= 60:
-            pages.append({"text": _clean(" ".join(buf)),
-                          "source": file.name, "page": page_num})
-            page_num += 1
-            buf = []
-
-    if buf:
-        pages.append({"text": _clean(" ".join(buf)),
-                      "source": file.name, "page": page_num})
-
-    return pages
-
-
-def _extract_csv(file):
-    file.seek(0)
-    text = file.read().decode("utf-8", errors="replace")
-    reader = csv.reader(io.StringIO(text))
-
-    rows = [" | ".join(r) for r in reader if any(c.strip() for c in r)]
-    pages = []
-
-    for i in range(0, len(rows), 30):
-        batch = rows[i:i+30]
-        pages.append({"text": _clean("\n".join(batch)),
-                      "source": file.name, "page": i // 30 + 1})
-
-    return pages
-
-
-def _extract_pptx(file):
-    from pptx import Presentation
-    file.seek(0)
-    prs = Presentation(file)
-
-    pages = []
-
-    for slide_num, slide in enumerate(prs.slides, start=1):
-        texts = []
-
-        for shape in slide.shapes:
-            if shape.has_text_frame:
-                for para in shape.text_frame.paragraphs:
-                    t = para.text.strip()
-                    if t:
-                        texts.append(t)
-
-        if texts:
-            pages.append({"text": _clean(" ".join(texts)),
-                          "source": file.name, "page": slide_num})
-
-    return pages
-
-
-def _extract_xlsx(file):
-    import openpyxl
-    file.seek(0)
-    wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
-
-    pages = []
-
-    for sheet in wb.worksheets:
-        rows = []
-
-        for row in sheet.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None and str(c).strip()]
-            if cells:
-                rows.append(" | ".join(cells))
-
-        for i in range(0, len(rows), 30):
-            batch = rows[i:i+30]
-            pages.append({"text": _clean("\n".join(batch)),
-                          "source": file.name, "page": i // 30 + 1})
-
-    return pages
-
-
-def extract_pages(file):
-    name = file.name.lower()
-
-    if name.endswith(".pdf"):
-        return _extract_pdf(file)
-    if name.endswith(".docx"):
-        return _extract_docx(file)
-    if name.endswith((".txt", ".md", ".rst")):
-        return _extract_txt(file)
-    if name.endswith(".csv"):
-        return _extract_csv(file)
-    if name.endswith(".pptx"):
-        return _extract_pptx(file)
-    if name.endswith(".xlsx"):
-        return _extract_xlsx(file)
-
-    raise ValueError(f"Unsupported file type: {file.name}")
 
 # ──────────────────────────────────────────────
 # RAG ENGINE
@@ -228,127 +82,157 @@ class RAGEngine:
     def __init__(self):
         self.embedder, self.reranker, self.client = load_models()
         self.chunks = []
-        self._faiss_index = None
+        self.index = None
         self.chat_history = []
 
-    def _split_text(self, text):
-        pieces, start = [], 0
+    # ──────────────────────────────────────────
+    # SPLIT TEXT
+    # ──────────────────────────────────────────
+    def _split(self, text):
+        chunks = []
+        i = 0
+        while i < len(text):
+            chunks.append(text[i:i+CHUNK_SIZE])
+            i += CHUNK_SIZE - OVERLAP
+        return chunks
 
-        while start < len(text):
-            end = min(start + CHUNK_SIZE, len(text))
-            piece = text[start:end].strip()
-
-            if piece:
-                pieces.append(piece)
-
-            start += CHUNK_SIZE - OVERLAP
-
-        return pieces
-
+    # ──────────────────────────────────────────
+    # LOAD FILES
+    # ──────────────────────────────────────────
     def load_files(self, files):
         self.chunks = []
 
         for file in files:
-            pages = extract_pages(file)
+            pages = extract_pdf(file)
 
-            for page_info in pages:
-                for chunk_text in self._split_text(page_info["text"]):
+            for p in pages:
+                for c in self._split(p["text"]):
                     self.chunks.append({
-                        "text": chunk_text,
-                        "source": page_info["source"],
-                        "page": page_info["page"],
+                        "text": c,
+                        "source": p["source"],
+                        "page": p["page"]
                     })
 
-        with lock:
+        with index_lock:
             self._build_index()
 
+    # ──────────────────────────────────────────
+    # BUILD INDEX
+    # ──────────────────────────────────────────
     def _build_index(self):
         texts = [c["text"] for c in self.chunks]
 
         vecs = self.embedder.encode(
             texts,
-            batch_size=BATCH_SIZE,
-            normalize_embeddings=True,
             convert_to_numpy=True,
+            normalize_embeddings=True
         ).astype("float32")
 
         index = faiss.IndexFlatIP(vecs.shape[1])
         index.add(vecs)
+        self.index = index
 
-        self._faiss_index = index
-
+    # ──────────────────────────────────────────
+    # RETRIEVE
+    # ──────────────────────────────────────────
     def retrieve(self, query):
-        if self._faiss_index is None:
+        if self.index is None:
             return []
 
-        q_vec = self.embedder.encode(
-            [query],
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        ).astype("float32")
+        q = self.embedder.encode([query], normalize_embeddings=True).astype("float32")
+        _, idx = self.index.search(q, TOP_K)
 
-        _, idxs = self._faiss_index.search(q_vec, TOP_K_FETCH)
-        return [self.chunks[i] for i in idxs[0]]
+        return [self.chunks[i] for i in idx[0]]
 
-    def stream_answer(self, query):
+    # ──────────────────────────────────────────
+    # SAFE API CALL
+    # ──────────────────────────────────────────
+    def _safe_llm(self, prompt, max_tokens=500):
+
+        retries = 3
+        delay = 2
+
+        for attempt in range(retries):
+            try:
+                time.sleep(1)
+
+                with api_lock:
+                    response = self.client.chat.completions.create(
+                        model=LLM_MODEL,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=max_tokens,
+                        temperature=0.3,
+                        stream=False
+                    )
+
+                return response.choices[0].message.content
+
+            except Exception:
+                time.sleep(delay)
+                delay *= 2
+
+        return "⚠️ Server busy. Try again in a few seconds."
+
+    # ──────────────────────────────────────────
+    # STREAM ANSWER
+    # ──────────────────────────────────────────
+    def stream_answer(self, query) -> Generator[str, None, None]:
+
         contexts = self.retrieve(query)
 
         if not contexts:
-            yield "No relevant data found."
+            yield "No relevant info found."
             return
 
-        context_text = "\n".join([c["text"] for c in contexts])
+        context = "\n".join([c["text"] for c in contexts])[:5000]
 
-        prompt = f"Answer based on context:\n{context_text}\n\nQuestion: {query}"
+        prompt = f"Answer using this:\n{context}\n\nQ: {query}"
 
-        response = self.client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            stream=True,
-        )
+        answer = self._safe_llm(prompt, 600)
 
-        for chunk in response:
-            token = getattr(chunk.choices[0].delta, "content", "") or ""
-            yield token
+        for word in answer.split():
+            yield word + " "
 
+    # ──────────────────────────────────────────
+    # MAP REDUCE SUMMARY (🔥 STABLE)
+    # ──────────────────────────────────────────
     def stream_summary(self):
-        if not self.chunks:
-            yield "No documents loaded."
-            return
-    
-        full_text = " ".join([c["text"] for c in self.chunks])[:50000]
-    
-        prompt = f"Summarize the following document clearly:\n{full_text}"
-    
-        retries = 3
-        delay = 2
-    
-        for attempt in range(retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=True,
-                    max_tokens=800,
-                    temperature=0.3,
-                )
-    
-                for chunk in response:
-                    token = getattr(chunk.choices[0].delta, "content", "") or ""
-                    if token:
-                        yield token
-    
-                return  # success → exit
-    
-            except Exception as e:
-                if attempt < retries - 1:
-                    time.sleep(delay)
-                    delay *= 2
-                    yield "⚠️ Retrying...\n"
-                else:
-                    yield "❌ Groq API error. Please try again after a few seconds."
 
+        if not self.chunks:
+            yield "No document."
+            return
+
+        full_text = " ".join([c["text"] for c in self.chunks])[:MAX_INPUT_SIZE]
+
+        # 🔹 STEP 1: SPLIT INTO SAFE BATCHES
+        batches = [
+            full_text[i:i+SUMMARY_BATCH_CHARS]
+            for i in range(0, len(full_text), SUMMARY_BATCH_CHARS)
+        ]
+
+        partials = []
+
+        # 🔹 STEP 2: MAP
+        for i, batch in enumerate(batches, 1):
+            yield f"🔹 Processing part {i}/{len(batches)}...\n"
+
+            prompt = f"Summarize in 5 bullet points:\n{batch}"
+            summary = self._safe_llm(prompt, 300)
+
+            partials.append(summary)
+
+        # 🔹 STEP 3: REDUCE
+        yield "\n🔹 Final summary...\n"
+
+        combined = "\n".join(partials)[:10000]
+
+        final_prompt = f"Combine into final summary (8–12 bullets):\n{combined}"
+        final = self._safe_llm(final_prompt, 600)
+
+        yield final
+
+    # ──────────────────────────────────────────
     def clear(self):
         self.chunks = []
-        self._faiss_index = None
+        self.index = None
         self.chat_history = []
