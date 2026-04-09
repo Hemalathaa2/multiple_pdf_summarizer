@@ -1,35 +1,41 @@
 # =========================
-# app.py (FINAL - ONLY DISPLAY FIX)
+# app.py (AUTO DETECT + TEXT LIMIT + DISPLAY FIX)
 # =========================
 
 import streamlit as st
 from rag_engine import RAGEngine
 
-st.set_page_config(
-    page_title="SmartDoc AI",
-    page_icon="📄",
-    layout="wide",
-)
+st.set_page_config(page_title="SmartDoc AI", page_icon="📄", layout="wide")
 
-st.markdown('<div class="main-title">📄 SmartDoc AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Summarise & Chat with Documents</div>', unsafe_allow_html=True)
+st.title("📄 SmartDoc AI")
 
 if "rag" not in st.session_state:
     st.session_state.rag = RAGEngine()
 
 rag = st.session_state.rag
 
-uploaded_files = st.file_uploader("Upload documents", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
+user_text = st.text_area("Or paste text here", height=200)
 
-if uploaded_files:
-    with st.spinner("Processing..."):
-        rag.load_files(uploaded_files)
-        st.success("Files loaded!")
+# 🔥 AUTO DETECT
+use_text = user_text.strip() != ""
 
-if st.button("📝 Generate Summary"):
+# TEXT LIMIT
+if len(user_text) > 15000:
+    st.warning("Text too long. Please limit to 15000 characters.")
+
+if st.button("Generate Summary"):
 
     result = ""
     placeholder = st.empty()
+
+    if use_text:
+        rag.chunks = [{"text": user_text, "source": "User Input", "page": 1}]
+    else:
+        if not uploaded_files:
+            st.warning("Upload file or paste text")
+            st.stop()
+        rag.load_files(uploaded_files)
 
     for token in rag.stream_summary():
         result += token
@@ -37,25 +43,10 @@ if st.button("📝 Generate Summary"):
 
     placeholder.empty()
 
-    # ✅ SHOW SUMMARY
     st.subheader("Final Summary")
     st.write(result)
 
-    # ✅ DOWNLOAD OPTION
-    st.download_button("⬇️ Download Summary", data=result, file_name="summary.txt")
-
-query = st.chat_input("Ask something about your document...")
-
-if query:
-    answer = ""
-    placeholder = st.empty()
-
-    for token in rag.stream_answer(query):
-        answer += token
-        placeholder.markdown(answer + "▌")
-
-    placeholder.empty()
-    st.markdown(answer)
+    st.download_button("Download Summary", result, "summary.txt")
 
 st.markdown("---")
-st.markdown("✨ Built with SmartDoc AI")
+st.markdown("✨ SmartDoc AI")
