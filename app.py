@@ -1,12 +1,15 @@
-
 # =========================
-# app.py (MINIMAL CHANGE - NO HISTORY STORAGE)
+# app.py (FINAL - ONLY DISPLAY FIX)
 # =========================
 
 import streamlit as st
 from rag_engine import RAGEngine
 
-st.set_page_config(page_title="SmartDoc AI", page_icon="📄", layout="wide")
+st.set_page_config(
+    page_title="SmartDoc AI",
+    page_icon="📄",
+    layout="wide",
+)
 
 st.markdown('<div class="main-title">📄 SmartDoc AI</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Summarise & Chat with Documents</div>', unsafe_allow_html=True)
@@ -24,19 +27,20 @@ if uploaded_files:
         st.success("Files loaded!")
 
 if st.button("📝 Generate Summary"):
+
     result = ""
+    placeholder = st.empty()
+
+    for token in rag.stream_summary():
+        result += token
+        placeholder.markdown(result + "▌")
+
     placeholder.empty()
 
-# ✅ DISPLAY SUMMARY PROPERLY
+    # ✅ SHOW SUMMARY
     st.subheader("Final Summary")
     st.write(result)
-    
-    # Save final summary
-    rag.chat_history.append({
-        "role": "assistant",
-        "content": result
-    })
-    
+
     # ✅ DOWNLOAD OPTION
     st.download_button("⬇️ Download Summary", data=result, file_name="summary.txt")
 
