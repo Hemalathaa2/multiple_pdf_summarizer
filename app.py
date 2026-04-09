@@ -77,5 +77,3 @@ if st.button("Get Answer"):
         st.write("🧠 Answer:")
         st.write(answer)
 
-st.markdown("---")
-st.markdown("✨ SmartDoc AI")
