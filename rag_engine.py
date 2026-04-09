@@ -1,5 +1,5 @@
 # =========================
-# rag_engine.py (ORIGINAL + ONLY SUMMARY FIX)
+# rag_engine.py (FINAL - ONLY SUMMARY FIX)
 # =========================
 
 """
@@ -143,22 +143,19 @@ class RAGEngine:
         for word in answer.split():
             yield word + " "
 
-    # ✅ FIXED ONLY THIS FUNCTION
     def stream_summary(self):
 
         if not self.chunks:
             yield "No document."
             return
 
-        # group by file
         by_source = {}
         for c in self.chunks:
             by_source.setdefault(c["source"], []).append(c["text"])
 
         summaries = []
 
-        # summarize each file FULLY (not just first part)
-        for i, (source, texts) in enumerate(by_source.items()):
+        for source, texts in by_source.items():
             yield f"🔹 Processing {source}...\n"
 
             full_text = " ".join(texts)[:SUMMARY_BATCH_CHARS]
