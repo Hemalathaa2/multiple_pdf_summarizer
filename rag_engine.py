@@ -1,31 +1,32 @@
-# =========================
-# rag_engine.py (FINAL FIXED MULTI-FILE + FORMAT)
-# =========================
+"""
+rag_engine.py - Production-grade RAG engine
+"""
 
 import re
-import numpy as np
 import torch
 import faiss
 import fitz
 import streamlit as st
 
+import docx
+from pptx import Presentation
+
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from groq import Groq
 from typing import Generator
 
+# Constants
 EMBED_MODEL = "all-MiniLM-L6-v2"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 LLM_MODEL = "llama-3.1-8b-instant"
 
 CHUNK_SIZE = 1500
 OVERLAP = 300
-TOP_K_FINAL = 5
 SUMMARY_BATCH_CHARS = 20000
-SUMMARY_REDUCE_LIMIT = 18000
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+# CLEAN TEXT
 def _clean(text: str) -> str:
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
     text = re.sub(r"\n+", " ", text)
@@ -33,6 +34,7 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+# FILE EXTRACTORS
 def _extract_pdf(file):
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
@@ -45,18 +47,64 @@ def _extract_pdf(file):
     return pages
 
 
+def _extract_txt(file):
+    file.seek(0)
+    text = file.read().decode("utf-8", errors="ignore")
+    return [{"text": _clean(text), "source": file.name, "page": 1}]
+
+
+def _extract_docx(file):
+    file.seek(0)
+    doc = docx.Document(file)
+    text = " ".join([para.text for para in doc.paragraphs])
+    return [{"text": _clean(text), "source": file.name, "page": 1}]
+
+
+def _extract_pptx(file):
+    file.seek(0)
+    prs = Presentation(file)
+    slides = []
+
+    for i, slide in enumerate(prs.slides):
+        content = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                content.append(shape.text)
+
+        text = _clean(" ".join(content))
+        if text:
+            slides.append({
+                "text": text,
+                "source": file.name,
+                "page": i + 1
+            })
+
+    return slides
+
+
 def extract_pages(file):
-    if file.name.lower().endswith(".pdf"):
+    name = file.name.lower()
+
+    if name.endswith(".pdf"):
         return _extract_pdf(file)
-    raise ValueError("Unsupported file")
+    elif name.endswith(".txt"):
+        return _extract_txt(file)
+    elif name.endswith(".docx"):
+        return _extract_docx(file)
+    elif name.endswith(".pptx"):
+        return _extract_pptx(file)
+    else:
+        raise ValueError(f"Unsupported file type: {file.name}")
 
 
+# RAG ENGINE
 class RAGEngine:
 
     def __init__(self):
         self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
         self.embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
         self.reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
+
         self.chunks = []
         self._faiss_index = None
 
@@ -68,9 +116,11 @@ class RAGEngine:
         return chunks
 
     def load_files(self, files):
-        self.chunks = []  # 🔥 FIX: always reset
+        self.chunks = []  # reset
+
         for file in files:
             pages = extract_pages(file)
+
             for p in pages:
                 for c in self._split_text(p["text"]):
                     self.chunks.append({
@@ -78,14 +128,6 @@ class RAGEngine:
                         "source": p["source"],
                         "page": p["page"]
                     })
-        self._build_index()
-
-    def _build_index(self):
-        texts = [c["text"] for c in self.chunks]
-        vecs = self.embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
-        index = faiss.IndexFlatIP(vecs.shape[1])
-        index.add(vecs)
-        self._faiss_index = index
 
     def _call_llm(self, prompt, max_tokens=700):
         try:
@@ -97,15 +139,15 @@ class RAGEngine:
             )
             return response.choices[0].message.content or ""
         except Exception:
-            return "API Error"
+            return "⚠️ API error"
 
     def stream_summary(self):
 
         if not self.chunks:
-            yield "No document"
+            yield "No document."
             return
 
-        # 🔥 GROUP BY FILE (CRITICAL FIX)
+        # GROUP BY FILE
         by_source = {}
         for c in self.chunks:
             by_source.setdefault(c["source"], []).append(c["text"])
@@ -133,10 +175,5 @@ class RAGEngine:
 
             final_output += f"\n\n📄 {source}\n{file_summary}\n"
 
-        yield "\n🔹 Final Combined Summary Ready\n"
+        yield "\n🔹 Final Summary Ready\n"
         yield final_output
-
-    def stream_answer(self, query):
-        yield "Ask after summary"
-
-
