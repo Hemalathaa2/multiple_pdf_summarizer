@@ -175,29 +175,34 @@ class RAGEngine:
     
             for batch in batches:
                 prompt = f"""
-    Summarize into key points.
-    Each point should be a short meaningful sentence.
+    Summarize into key meaningful points.
+    
+    Rules:
+    - Each point should be clear and slightly explained (1–2 lines)
+    - Do NOT include any heading or intro sentence
+    - Do NOT say 'summary'
     
     Content:
     {batch}
     """
-                summary = self._call_llm(prompt, 200)
+                summary = self._call_llm(prompt, 250)
                 batch_summaries.append(summary)
     
             combined = "\n".join(batch_summaries)
     
-            # 🔥 STRICT FINAL PROMPT
+            # 🔥 FINAL CLEAN PROMPT (STRICT FORMAT)
             final_prompt = f"""
-    Generate summary with STRICT FORMAT:
+    Generate final summary.
     
-    - EXACTLY {max_points} points
-    - Each point = 1 short meaningful sentence
+    Rules:
+    - EXACTLY {max_points} bullet points
+    - Each point = 1–2 lines (slightly explained)
     - DO NOT write any heading
-    - DO NOT write "Here is summary"
-    - DO NOT add explanations
-    - ONLY bullet points
-    - Each point MUST be on separate line
-    - Start each line with "•"
+    - DO NOT write 'Here is summary'
+    - DO NOT mention number of points
+    - DO NOT use numbering
+    - ONLY bullet points using '•'
+    - Each point MUST be on a new line
     
     Content:
     {combined}
@@ -205,24 +210,24 @@ class RAGEngine:
     
             file_summary = self._call_llm(final_prompt, 400)
     
-            # 🔥 HARD CLEANING (VERY IMPORTANT)
-            # Remove unwanted phrases
+            # 🔥 HARD CLEANING (CRITICAL FIX)
             file_summary = re.sub(r"(?i)here.*summary.*:\s*", "", file_summary)
     
-            # Split aggressively
-            lines = re.split(r"(?:\n|•|\-|\d+\.)+", file_summary)
+            # Split properly (fix continuous text issue)
+            lines = re.split(r"\n+", file_summary)
     
-            # Clean + filter
             clean_lines = []
             for l in lines:
                 l = l.strip()
-                if len(l) > 5:  # remove junk
+                if len(l) > 10:
+                    # remove unwanted prefixes
+                    l = re.sub(r"^[•\\-\\d\\.\\) ]+", "", l)
                     clean_lines.append(l)
     
-            # Enforce limit
+            # enforce limit
             clean_lines = clean_lines[:max_points]
     
-            # FINAL FORMAT (guaranteed newline bullets)
+            # ✅ FINAL FORMAT (guaranteed line-by-line bullets)
             file_summary = "\n".join([f"• {l}" for l in clean_lines])
     
             final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
@@ -230,6 +235,7 @@ class RAGEngine:
         yield "\n🔹 Final Summary Ready\n"
         yield final_output
 
+    
     # 🔥 DOCUMENT Q&A (SMART)
     def ask_question(self, query: str):
 
