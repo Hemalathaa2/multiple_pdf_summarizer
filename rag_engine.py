@@ -142,7 +142,7 @@ class RAGEngine:
             return "⚠️ API error"
 
     def stream_summary(self):
-    
+
         if not self.chunks:
             yield "No document."
             return
@@ -156,47 +156,72 @@ class RAGEngine:
         for source, texts in by_source.items():
             yield f"\n🔹 Processing {source}...\n"
     
-            # STEP 1: STRICT CHUNK SUMMARIES
-            chunk_summaries = []
+            # 🔹 STEP 1: Merge chunks (FASTER)
+            full_text = " ".join(texts)
     
-            for text in texts:
+            # Split into BIG batches (reduce API calls)
+            batches = [full_text[i:i+8000] for i in range(0, len(full_text), 8000)]
+    
+            batch_summaries = []
+    
+            # 🔹 STEP 2: Summarize batches (few calls only)
+            for batch in batches:
                 prompt = f"""
-    You are a strict summarizer.
+    You are a highly efficient summarizer.
     
-    Summarize the below content in MAXIMUM 5 bullet points.
-    Do NOT rewrite or explain.
-    Do NOT copy sentences.
-    Compress aggressively.
+    Summarize the below content in SHORT bullet points.
+    Keep it concise and extract only key ideas.
     
     Content:
-    {text}
+    {batch}
     """
-                summary = self._call_llm(prompt, 200)
-                chunk_summaries.append(summary)
+                summary = self._call_llm(prompt, 250)
+                batch_summaries.append(summary)
     
-            # STEP 2: COMBINE ALL CHUNK SUMMARIES
-            combined_text = "\n".join(chunk_summaries)
+            # 🔹 STEP 3: Final Summary
+            combined = "\n".join(batch_summaries)
     
-            # STEP 3: FINAL GLOBAL SUMMARY
             final_prompt = f"""
-    You are an expert summarizer.
+    Create a FINAL structured summary:
     
-    Below are multiple partial summaries of a document.
-    
-    Generate ONE FINAL summary:
-    - Use clear headings
+    - Use headings
     - Use bullet points
     - Keep it concise
-    - Capture ONLY key insights
-    - Avoid repetition
+    - Remove repetition
     
     Content:
-    {combined_text}
+    {combined}
     """
     
             file_summary = self._call_llm(final_prompt, 400)
     
-            final_output += f"\n\n📄 {source}\n{file_summary}\n"
+            # 🔹 STEP 4: AUTO Q&A GENERATION
+            qa_prompt = f"""
+    Based on the document summary below, generate:
+    
+    1. 5 Important Questions
+    2. Clear Answers for each
+    
+    Format:
+    Q1:
+    A1:
+    ...
+    
+    Content:
+    {file_summary}
+    """
+    
+            qa_output = self._call_llm(qa_prompt, 400)
+    
+            final_output += f"""
+    📄 {source}
+    
+    📝 Summary:
+    {file_summary}
+    
+    ❓ Auto Q&A:
+    {qa_output}
+    """
     
         yield "\n🔹 Final Summary Ready\n"
         yield final_output
