@@ -265,18 +265,27 @@ class RAGEngine:
 
         scores = (chunk_embeddings @ query_embedding.T).squeeze()
 
-        top_k = 5
+        top_k = 8
         top_indices = scores.argsort()[-top_k:][::-1]
 
-        context = " ".join([chunk_texts[i] for i in top_indices])
+        selected_chunks = [chunk_texts[i] for i in top_indices]
 
+        context = " ".join(selected_chunks)
+        
+        # 🔥 extend to nearest sentence end
+        if not context.endswith((".", "!", "?")):
+            extra = " ".join(chunk_texts[:3])
+            context += " " + extra
+        
         prompt = f"""
-Answer ONLY using the document.
+Answer the question using ONLY the given document.
 
 Rules:
-- Be concise
-- If not found → "Not found in document"
-- Do NOT guess
+- Give complete answer
+- Do NOT cut sentences halfway
+- If a point starts, complete it fully
+- Use structured format if needed
+- If not found → say "Not found in document"
 
 Context:
 {context}
@@ -285,4 +294,4 @@ Question:
 {query}
 """
 
-        return self._call_llm(prompt, 200)
+        return self._call_llm(prompt, 400)
