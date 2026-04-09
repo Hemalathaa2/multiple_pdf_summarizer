@@ -184,17 +184,24 @@ class RAGEngine:
             final_prompt = f"""
     Create FINAL summary:
     
-    - MAX 8 bullet points ONLY
+    - MAX 8 or more bullet points depending on the file uploaded
     - Very short lines
     - No explanation
     - No repetition
+    - EACH point must be on NEW LINE
+    - Each line must start with "•"
+    - No paragraph
     
     Content:
     {combined}
     """
     
             file_summary = self._call_llm(final_prompt, 200)
-    
+            # ✅ FORCE BULLET FORMAT (line-by-line)
+            lines = re.split(r"[•\n\-]+", file_summary)
+            clean_lines = [l.strip() for l in lines if l.strip()]
+
+            file_summary = "\n".join([f"• {l}" for l in clean_lines])
             final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
     
         yield "\n🔹 Final Summary Ready\n"
