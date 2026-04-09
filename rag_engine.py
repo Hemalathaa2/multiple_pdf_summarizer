@@ -1,5 +1,5 @@
 """
-rag_engine.py - Production-grade RAG engine
+rag_engine.py - Production-grade RAG engine (Optimized + Q&A + Clean Summary)
 """
 
 import re
@@ -13,7 +13,6 @@ from pptx import Presentation
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from groq import Groq
-from typing import Generator
 
 # Constants
 EMBED_MODEL = "all-MiniLM-L6-v2"
@@ -22,7 +21,6 @@ LLM_MODEL = "llama-3.1-8b-instant"
 
 CHUNK_SIZE = 1500
 OVERLAP = 300
-SUMMARY_BATCH_CHARS = 20000
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -106,7 +104,6 @@ class RAGEngine:
         self.reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
 
         self.chunks = []
-        self._faiss_index = None
 
     def _split_text(self, text):
         chunks, i = [], 0
@@ -116,7 +113,7 @@ class RAGEngine:
         return chunks
 
     def load_files(self, files):
-        self.chunks = []  # reset
+        self.chunks = []
 
         for file in files:
             pages = extract_pages(file)
@@ -141,96 +138,114 @@ class RAGEngine:
         except Exception:
             return "⚠️ API error"
 
+    # 🔥 SUMMARY (FINAL)
     def stream_summary(self):
 
         if not self.chunks:
             yield "No document."
             return
-    
+
         by_source = {}
         for c in self.chunks:
             by_source.setdefault(c["source"], []).append(c["text"])
-    
+
         final_output = ""
-    
+
         for source, texts in by_source.items():
             yield f"\n🔹 Processing {source}...\n"
-    
-            # Merge all text
+
             full_text = " ".join(texts)
-    
-            # Split into large batches (fast)
+
+            # 🔹 Dynamic point count
+            word_count = len(full_text.split())
+
+            if word_count < 1500:
+                max_points = 6
+            elif word_count < 4000:
+                max_points = 10
+            elif word_count < 8000:
+                max_points = 12
+            else:
+                max_points = 15
+
+            # Batch processing
             batches = [full_text[i:i+8000] for i in range(0, len(full_text), 8000)]
-    
+
             batch_summaries = []
-    
+
             for batch in batches:
                 prompt = f"""
-    Summarize the content below in MAX 5 bullet points.
-    - Be VERY SHORT
-    - Only key ideas
-    - No explanation
-    - No extra text
-    
-    Content:
-    {batch}
-    """
-                summary = self._call_llm(prompt, 150)
+Summarize the content into key points.
+Each point should be a short meaningful sentence.
+
+Content:
+{batch}
+"""
+                summary = self._call_llm(prompt, 200)
                 batch_summaries.append(summary)
-    
+
             combined = "\n".join(batch_summaries)
-    
-            # FINAL SHORT SUMMARY
+
             final_prompt = f"""
-    Create FINAL summary:
-    
-    - MAX 8 or more bullet points depending on the file uploaded
-    - Very short lines
-    - No explanation
-    - No repetition
-    - EACH point must be on NEW LINE
-    - Each line must start with "•"
-    - No paragraph
-    
-    Content:
-    {combined}
-    """
-    
-            file_summary = self._call_llm(final_prompt, 200)
-            # ✅ FORCE BULLET FORMAT (line-by-line)
-            lines = re.split(r"[•\n\-]+", file_summary)
+Create FINAL summary:
+
+STRICT RULES:
+- EXACTLY {max_points} points
+- Each point = 1 short meaningful sentence
+- Each point on NEW LINE
+- Start with "•"
+- No paragraph
+- No repetition
+
+Content:
+{combined}
+"""
+
+            file_summary = self._call_llm(final_prompt, 400)
+
+            # Clean formatting
+            lines = re.split(r"(?:\n|•|-|\d+\.)+", file_summary)
             clean_lines = [l.strip() for l in lines if l.strip()]
+            clean_lines = clean_lines[:max_points]
 
             file_summary = "\n".join([f"• {l}" for l in clean_lines])
+
             final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
-    
+
         yield "\n🔹 Final Summary Ready\n"
         yield final_output
 
+    # 🔥 DOCUMENT Q&A (SMART)
     def ask_question(self, query: str):
 
         if not self.chunks:
             return "No document loaded."
-    
-        # 🔹 Retrieve relevant chunks (simple search)
-        texts = [c["text"] for c in self.chunks]
-    
-        # Limit for speed
-        context = " ".join(texts[:20])
-    
+
+        query_embedding = self.embedder.encode([query])
+
+        chunk_texts = [c["text"] for c in self.chunks]
+        chunk_embeddings = self.embedder.encode(chunk_texts)
+
+        scores = (chunk_embeddings @ query_embedding.T).squeeze()
+
+        top_k = 5
+        top_indices = scores.argsort()[-top_k:][::-1]
+
+        context = " ".join([chunk_texts[i] for i in top_indices])
+
         prompt = f"""
-    Answer the question ONLY using the document content.
-    
-    Rules:
-    - Be concise
-    - If answer not found → say "Not found in document"
-    - Do NOT guess
-    
-    Context:
-    {context}
-    
-    Question:
-    {query}
-    """
-    
+Answer ONLY using the document.
+
+Rules:
+- Be concise
+- If not found → "Not found in document"
+- Do NOT guess
+
+Context:
+{context}
+
+Question:
+{query}
+"""
+
         return self._call_llm(prompt, 200)
