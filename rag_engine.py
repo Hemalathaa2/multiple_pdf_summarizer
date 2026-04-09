@@ -169,7 +169,23 @@ class RAGEngine:
                 max_points = 15
     
             # 🔹 Batch processing
-            batches = [full_text[i:i+8000] for i in range(0, len(full_text), 8000)]
+            def _create_batches(text, size=8000):
+                batches = []
+                start = 0
+            
+                while start < len(text):
+                    end = start + size
+            
+                    # extend to nearest sentence end
+                    if end < len(text):
+                        while end < len(text) and text[end] not in ".!?":
+                            end += 1
+            
+                    batches.append(text[start:end].strip())
+                    start = end
+            
+                return batches
+            batches = _create_batches(full_text)
     
             batch_summaries = []
     
@@ -226,7 +242,7 @@ class RAGEngine:
     
             # enforce limit
             clean_lines = clean_lines[:max_points]
-    
+            clean_lines = [l for l in clean_lines if not l.endswith("of") and not l.endswith("and")]
             # ✅ FINAL FORMAT (guaranteed line-by-line bullets)
             file_summary = "\n".join([f"- {l}" for l in clean_lines])
     
