@@ -59,7 +59,7 @@ if st.button("Generate Summary"):
     placeholder.empty()
 
     st.subheader("Final Summary")
-    st.write(result)
+    st.markdown(result)
 
     st.download_button("⬇️ Download Summary", result, "summary.txt")
 
