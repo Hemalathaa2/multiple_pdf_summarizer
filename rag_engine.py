@@ -156,72 +156,74 @@ class RAGEngine:
         for source, texts in by_source.items():
             yield f"\n🔹 Processing {source}...\n"
     
-            # 🔹 STEP 1: Merge chunks (FASTER)
+            # Merge all text
             full_text = " ".join(texts)
     
-            # Split into BIG batches (reduce API calls)
+            # Split into large batches (fast)
             batches = [full_text[i:i+8000] for i in range(0, len(full_text), 8000)]
     
             batch_summaries = []
     
-            # 🔹 STEP 2: Summarize batches (few calls only)
             for batch in batches:
                 prompt = f"""
-    You are a highly efficient summarizer.
-    
-    Summarize the below content in SHORT bullet points.
-    Keep it concise and extract only key ideas.
+    Summarize the content below in MAX 5 bullet points.
+    - Be VERY SHORT
+    - Only key ideas
+    - No explanation
+    - No extra text
     
     Content:
     {batch}
     """
-                summary = self._call_llm(prompt, 250)
+                summary = self._call_llm(prompt, 150)
                 batch_summaries.append(summary)
     
-            # 🔹 STEP 3: Final Summary
             combined = "\n".join(batch_summaries)
     
+            # FINAL SHORT SUMMARY
             final_prompt = f"""
-    Create a FINAL structured summary:
+    Create FINAL summary:
     
-    - Use headings
-    - Use bullet points
-    - Keep it concise
-    - Remove repetition
+    - MAX 8 bullet points ONLY
+    - Very short lines
+    - No explanation
+    - No repetition
     
     Content:
     {combined}
     """
     
-            file_summary = self._call_llm(final_prompt, 400)
+            file_summary = self._call_llm(final_prompt, 200)
     
-            # 🔹 STEP 4: AUTO Q&A GENERATION
-            qa_prompt = f"""
-    Based on the document summary below, generate:
-    
-    1. 5 Important Questions
-    2. Clear Answers for each
-    
-    Format:
-    Q1:
-    A1:
-    ...
-    
-    Content:
-    {file_summary}
-    """
-    
-            qa_output = self._call_llm(qa_prompt, 400)
-    
-            final_output += f"""
-    📄 {source}
-    
-    📝 Summary:
-    {file_summary}
-    
-    ❓ Auto Q&A:
-    {qa_output}
-    """
+            final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
     
         yield "\n🔹 Final Summary Ready\n"
         yield final_output
+
+    def ask_question(self, query: str):
+
+        if not self.chunks:
+            return "No document loaded."
+    
+        # 🔹 Retrieve relevant chunks (simple search)
+        texts = [c["text"] for c in self.chunks]
+    
+        # Limit for speed
+        context = " ".join(texts[:20])
+    
+        prompt = f"""
+    Answer the question ONLY using the document content.
+    
+    Rules:
+    - Be concise
+    - If answer not found → say "Not found in document"
+    - Do NOT guess
+    
+    Context:
+    {context}
+    
+    Question:
+    {query}
+    """
+    
+        return self._call_llm(prompt, 200)
