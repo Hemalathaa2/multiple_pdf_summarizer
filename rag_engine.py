@@ -228,7 +228,7 @@ class RAGEngine:
             clean_lines = clean_lines[:max_points]
     
             # ✅ FINAL FORMAT (guaranteed line-by-line bullets)
-            file_summary = "\n".join([f"• {l}" for l in clean_lines])
+            file_summary = "\n".join([f"- {l}" for l in clean_lines])
     
             final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
     
