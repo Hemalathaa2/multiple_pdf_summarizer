@@ -69,3 +69,14 @@ if st.button("Generate Summary"):
 
 st.markdown("---")
 st.markdown("✨ SmartDoc AI")
+st.markdown("### 💬 Ask Questions from Document")
+
+user_q = st.text_input("Enter your question")
+
+if st.button("Get Answer"):
+    if not user_q.strip():
+        st.warning("Enter a question")
+    else:
+        answer = rag.ask_question(user_q)
+        st.write("🧠 Answer:")
+        st.write(answer)
