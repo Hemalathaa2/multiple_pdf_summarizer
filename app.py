@@ -25,13 +25,19 @@ if uploaded_files:
 
 if st.button("📝 Generate Summary"):
     result = ""
-    placeholder = st.empty()
-
-    for token in rag.stream_summary():
-        result += token
-        placeholder.markdown(result + "▌")
-
     placeholder.empty()
+
+# ✅ DISPLAY SUMMARY PROPERLY
+    st.subheader("Final Summary")
+    st.write(result)
+    
+    # Save final summary
+    rag.chat_history.append({
+        "role": "assistant",
+        "content": result
+    })
+    
+    # ✅ DOWNLOAD OPTION
     st.download_button("⬇️ Download Summary", data=result, file_name="summary.txt")
 
 query = st.chat_input("Ask something about your document...")
