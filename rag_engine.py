@@ -144,21 +144,21 @@ class RAGEngine:
         if not self.chunks:
             yield "No document."
             return
-
+    
         by_source = {}
         for c in self.chunks:
             by_source.setdefault(c["source"], []).append(c["text"])
-
+    
         final_output = ""
-
+    
         for source, texts in by_source.items():
             yield f"\n🔹 Processing {source}...\n"
-
+    
             full_text = " ".join(texts)
-
-            # 🔹 Dynamic point count
+    
+            # 🔹 Dynamic points
             word_count = len(full_text.split())
-
+    
             if word_count < 1500:
                 max_points = 6
             elif word_count < 4000:
@@ -167,51 +167,66 @@ class RAGEngine:
                 max_points = 12
             else:
                 max_points = 15
-
-            # Batch processing
+    
+            # 🔹 Batch processing
             batches = [full_text[i:i+8000] for i in range(0, len(full_text), 8000)]
-
+    
             batch_summaries = []
-
+    
             for batch in batches:
                 prompt = f"""
-Summarize the content into key points.
-Each point should be a short meaningful sentence.
-
-Content:
-{batch}
-"""
+    Summarize into key points.
+    Each point should be a short meaningful sentence.
+    
+    Content:
+    {batch}
+    """
                 summary = self._call_llm(prompt, 200)
                 batch_summaries.append(summary)
-
+    
             combined = "\n".join(batch_summaries)
-
+    
+            # 🔥 STRICT FINAL PROMPT
             final_prompt = f"""
-Create FINAL summary:
-
-STRICT RULES:
-- EXACTLY {max_points} points
-- Each point = 1 short meaningful sentence
-- Each point on NEW LINE
-- Start with "•"
-- No paragraph
-- No repetition
-
-Content:
-{combined}
-"""
-
+    Generate summary with STRICT FORMAT:
+    
+    - EXACTLY {max_points} points
+    - Each point = 1 short meaningful sentence
+    - DO NOT write any heading
+    - DO NOT write "Here is summary"
+    - DO NOT add explanations
+    - ONLY bullet points
+    - Each point MUST be on separate line
+    - Start each line with "•"
+    
+    Content:
+    {combined}
+    """
+    
             file_summary = self._call_llm(final_prompt, 400)
-
-            # Clean formatting
-            lines = re.split(r"(?:\n|•|-|\d+\.)+", file_summary)
-            clean_lines = [l.strip() for l in lines if l.strip()]
+    
+            # 🔥 HARD CLEANING (VERY IMPORTANT)
+            # Remove unwanted phrases
+            file_summary = re.sub(r"(?i)here.*summary.*:\s*", "", file_summary)
+    
+            # Split aggressively
+            lines = re.split(r"(?:\n|•|\-|\d+\.)+", file_summary)
+    
+            # Clean + filter
+            clean_lines = []
+            for l in lines:
+                l = l.strip()
+                if len(l) > 5:  # remove junk
+                    clean_lines.append(l)
+    
+            # Enforce limit
             clean_lines = clean_lines[:max_points]
-
+    
+            # FINAL FORMAT (guaranteed newline bullets)
             file_summary = "\n".join([f"• {l}" for l in clean_lines])
-
+    
             final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
-
+    
         yield "\n🔹 Final Summary Ready\n"
         yield final_output
 
