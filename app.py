@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st 
 from rag_engine import RAGEngine
 
 st.set_page_config(page_title="SmartDoc AI", page_icon="📄", layout="wide")
@@ -10,7 +10,7 @@ if "rag" not in st.session_state:
 
 rag = st.session_state.rag
 
-# USER CHOICE
+# MODE SELECTION
 option = st.radio("Choose Mode", ["📄 Document Summarization", "✍️ Text Summarization"])
 
 uploaded_files = None
@@ -27,10 +27,6 @@ if option == "📄 Document Summarization":
 # TEXT MODE
 else:
     user_text = st.text_area("Paste your text here", height=200)
-
-# TEXT LIMIT
-if user_text and len(user_text) > 15000:
-    st.warning("Text too long. Please limit to 15000 characters.")
 
 # GENERATE SUMMARY
 if st.button("Generate Summary"):
@@ -67,8 +63,8 @@ if st.button("Generate Summary"):
 
     st.download_button("⬇️ Download Summary", result, "summary.txt")
 
+# 🔥 Q&A SECTION
 st.markdown("---")
-st.markdown("✨ SmartDoc AI")
 st.markdown("### 💬 Ask Questions from Document")
 
 user_q = st.text_input("Enter your question")
@@ -80,3 +76,6 @@ if st.button("Get Answer"):
         answer = rag.ask_question(user_q)
         st.write("🧠 Answer:")
         st.write(answer)
+
+st.markdown("---")
+st.markdown("✨ SmartDoc AI")
