@@ -230,7 +230,7 @@ class RAGEngine:
             # ✅ FINAL FORMAT (guaranteed line-by-line bullets)
             file_summary = "\n".join([f"- {l}" for l in clean_lines])
     
-            final_output += f"\n\n📄 {source}\n📝 Summary:\n{file_summary}\n"
+            final_output += f"\n\n---\n\n### 📄 {source}\n\n{file_summary}\n"
     
         yield "\n🔹 Final Summary Ready\n"
         yield final_output
